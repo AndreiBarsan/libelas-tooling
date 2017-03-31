@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Utility for converting a folder of png images to pgm, which can be read by
+# libelas and the associated batch depth utility (kitti2klg).
+
+for fname in $(ls); do
+  # The '-flatten' option ensures we also support transparent PNGs well.
+  convert "${fname}" -flatten "${fname%.*}.pgm"
+done

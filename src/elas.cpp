@@ -745,9 +745,11 @@ inline void Elas::findMatch(int32_t &u,int32_t &v,float &plane_a,float &plane_b,
         u_warp = u-d_curr;
         if (u_warp<window_size || u_warp>=width-window_size)
           continue;
+
         updatePosteriorMinimum((__m128i*)(I2_line_addr+16*u_warp),d_curr,xmm1,xmm2,val,min_val,min_d);
       }
     }
+
     for (d_curr=d_plane_min; d_curr<=d_plane_max; d_curr++) {
       u_warp = u-d_curr;
       if (u_warp<window_size || u_warp>=width-window_size)
