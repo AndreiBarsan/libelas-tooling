@@ -2,7 +2,19 @@
 # Utility for converting a folder of png images to pgm, which can be read by
 # libelas and the associated batch depth utility (kitti2klg).
 
-for fname in $(ls); do
-  # The '-flatten' option ensures we also support transparent PNGs well.
-  convert "${fname}" -flatten "${fname%.*}.pgm"
+if [[ $# != 1 ]]; then
+  echo >&2 "USAGE: $0 <folder>"
+  exit 1
+fi
+
+folder="$1"
+
+printf "Processing folder %s\n" "$folder"
+
+for fname in $(ls "$folder"); do
+  if ! [[ "${fname##*.}" == "pgm" ]]; then
+    printf "%s\n" "$fname"
+    # The '-flatten' option ensures we also support transparent PNGs well.
+    convert "$folder/$fname" -flatten "$folder/${fname%.*}.pgm"
+  fi
 done
