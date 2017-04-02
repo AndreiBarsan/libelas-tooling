@@ -18,6 +18,7 @@ namespace kitti2klg {
   const string KITTI_COLOR_LEFT_FOLDER      = "image_02";
   const string KITTI_COLOR_RIGHT_FOLDER     = "image_03";
 
+  // TODO(andrei): Move to dedicated utilities file.
   inline bool ends_with(const string& value, const string& ending) {
     if (ending.size() > value.size()) {
       return false;
@@ -41,13 +42,6 @@ namespace kitti2klg {
     fs::path left_dir = root;
     left_dir.append(KITTI_GRAYSCALE_LEFT_FOLDER);
     left_dir.append("data");
-
-    if (ends_with("derp herp", "erp")) {
-      cout << "OK!" << endl;
-    }
-    else {
-      cout  << "BAD!" << endl;
-    }
 
     /*
      * Folder structure for a stereo pair:
