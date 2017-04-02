@@ -78,6 +78,64 @@ namespace kitti2klg {
     return result;
   };
 
+  /**
+   * Reads a full timestamp with nanosecond resolution seconds, such as
+   * "2011-09-26 15:20:11.552379904".
+   *
+   * Populates the standard C++ time object, plus an additional long containing
+   * the nanoseconds (since the standard `tm` object only has second-level
+   * accuracy).
+   */
+  void read_timestamp_with_nanoseconds(
+      const string& input,
+      tm *time,
+      long *nanosecond
+  ) {
+    int year, month, day, hour, minute, second;
+    sscanf(input.c_str(), "%d-%d-%d %d:%d:%d.%ld", &year, &month, &day, &hour,
+           &minute, &second, nanosecond);
+    time->tm_year = year;
+    time->tm_mon = month - 1;
+    time->tm_mday = day;
+    time->tm_hour = hour;
+    time->tm_min = minute;
+    time->tm_sec = second;
+  };
+
+  /**
+   * NOTE: This only looks at the timestamps associated with the left
+   * greyscale images. There are also timestamps associated with each of the
+   * other cameras, and they are not exactly identitcal. Nevertheless, this
+   * approach should be good enough for the current application.
+   *
+   * @return A vector of UTC timestamps at MICROSECOND resolution, necessary
+   *    for the custom Kintinuous `.klg` format.
+   */
+  vector<long> get_sequence_timestamps(const fs::path &root) {
+    fs::path timestamp_fpath = root;
+    timestamp_fpath.append(KITTI_GRAYSCALE_LEFT_FOLDER);
+    timestamp_fpath.append("timestamps.txt");
+
+    ifstream in(timestamp_fpath);
+
+    vector<long> timestamps;
+    string chunk;
+    while (getline(in, chunk, '\n')) {
+      tm time;
+      long nanosecond;
+      read_timestamp_with_nanoseconds(chunk, &time, &nanosecond);
+
+      // The format expected by Kintinuous uses microsecond resolution.
+      long microsecond = nanosecond / 1000;
+      time_t total_seconds = timegm(&time);
+      long total_microseconds = total_seconds * 1000 * 1000 + microsecond;
+
+      timestamps.push_back(total_microseconds);
+    }
+
+    return timestamps;
+  }
+
   fs::path get_expanded_path(const string& raw_path) {
     // We C now!
     wordexp_t expansion_result;
@@ -85,6 +143,37 @@ namespace kitti2klg {
     fs::path foo = expansion_result.we_wordv[0];
     return foo;
   };
+
+  void write_kintinuous_log(const fs::path &kitti_sequence_root) {
+
+    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = get_kitti_stereo_pair_paths(kitti_sequence_root);
+    vector<long> timestamps = get_sequence_timestamps(kitti_sequence_root);
+
+    fs::path fpath = "test_dump.klg";
+    FILE *log_file = fopen(fpath.string().c_str(), "wb+");
+
+    // Kintinuous gets jpegs, and uses 'cvEncodeImage' to turn them into bytes,
+    // representing STILL JPEGS. We, sadly, have to do that as well.
+
+    // TODO(andrei): Read frame times from associated `timestamps.txt` files.
+    // However, each stream (left and right camera) have slightly different
+    // ones. Should we just use the left camera's stream? (Alternative:
+    // average left and right camera.)
+    int64_t frame_time = 0;
+    int32_t compressed_depth_size = 0;  // we use zlib to compress depth
+                                        // channel, and this is the size of the
+                                        // result.
+    // The width of the encoded jpeg.
+    int32_t image_size = 0; // encoded_image->width;
+
+    fwrite(&frame_time, sizeof(int64_t), 1, log_file);
+    fwrite(&compressed_depth_size, sizeof(int32_t), 1, log_file);
+    fwrite(&image_size, sizeof(int32_t), 1, log_file);
+//    fwrite(compressed_depth_buf, compressed_depth_size, 1, log_file);
+//    fwrite(encoded_rgb->data.ptr, image_size, 1, log_file);
+
+    fclose(log_file);
+  }
 
   void compute_depth(const pair<fs::path, fs::path>& pair) {
     // Heavily based on the demo program which ships with libelas.
@@ -168,22 +257,24 @@ int main() {
 
   fs::path kitti_root = kitti2klg::get_expanded_path("~/datasets/kitti");
   fs::path kitti_seq_path = kitti_root / "2011_09_26" / "2011_09_26_drive_0095_sync";
-  auto res = kitti2klg::get_kitti_stereo_pair_paths(kitti_seq_path);
-  if (res.size() == 0) {
-    std::cout << "No '*.pgm' files found in the KITTI root folder ["
-              << kitti_seq_path << "]." << std::endl;
-    return 1;
-  }
-  else {
-    std::cout << "Found " << res.size() << " stereo pairs to process." << std::endl;
+  kitti2klg::write_kintinuous_log(kitti_seq_path);
 
-    for (const std::pair<fs::path, fs::path>& stereo_pair_fpaths: res) {
-      kitti2klg::compute_depth(stereo_pair_fpaths);
-
-      std::cout << stereo_pair_fpaths.first << ", "
-                << stereo_pair_fpaths.second << std::endl;
-    }
-  }
+//  auto res = kitti2klg::get_kitti_stereo_pair_paths(kitti_seq_path);
+//  if (res.size() == 0) {
+//    std::cout << "No '*.pgm' files found in the KITTI root folder ["
+//              << kitti_seq_path << "]." << std::endl;
+//    return 1;
+//  }
+//  else {
+//    std::cout << "Found " << res.size() << " stereo pairs to process." << std::endl;
+//
+//    for (const std::pair<fs::path, fs::path>& stereo_pair_fpaths: res) {
+//      kitti2klg::compute_depth(stereo_pair_fpaths);
+//
+//      std::cout << stereo_pair_fpaths.first << ", "
+//                << stereo_pair_fpaths.second << std::endl;
+//    }
+//  }
 
 
   return 0;
