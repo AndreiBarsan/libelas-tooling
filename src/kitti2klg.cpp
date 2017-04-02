@@ -144,55 +144,34 @@ namespace kitti2klg {
     return foo;
   };
 
-  void write_kintinuous_log(const fs::path &kitti_sequence_root) {
+  unique_ptr<pair<image<uchar>*, image<uchar>*>> load_stereo_pair(
+      const pair<fs::path, fs::path>& pair_fpaths
+  ) {
+    auto result = make_unique<pair<image<uchar>*, image<uchar>*>>(
+      loadPGM(pair_fpaths.first.string().c_str()),
+      loadPGM(pair_fpaths.second.string().c_str())
+    );
+    auto left = result->first, right = result->second;
 
-    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = get_kitti_stereo_pair_paths(kitti_sequence_root);
-    vector<long> timestamps = get_sequence_timestamps(kitti_sequence_root);
-
-    fs::path fpath = "test_dump.klg";
-    FILE *log_file = fopen(fpath.string().c_str(), "wb+");
-
-    // Kintinuous gets jpegs, and uses 'cvEncodeImage' to turn them into bytes,
-    // representing STILL JPEGS. We, sadly, have to do that as well.
-
-    // TODO(andrei): Read frame times from associated `timestamps.txt` files.
-    // However, each stream (left and right camera) have slightly different
-    // ones. Should we just use the left camera's stream? (Alternative:
-    // average left and right camera.)
-    int64_t frame_time = 0;
-    int32_t compressed_depth_size = 0;  // we use zlib to compress depth
-                                        // channel, and this is the size of the
-                                        // result.
-    // The width of the encoded jpeg.
-    int32_t image_size = 0; // encoded_image->width;
-
-    fwrite(&frame_time, sizeof(int64_t), 1, log_file);
-    fwrite(&compressed_depth_size, sizeof(int32_t), 1, log_file);
-    fwrite(&image_size, sizeof(int32_t), 1, log_file);
-//    fwrite(compressed_depth_buf, compressed_depth_size, 1, log_file);
-//    fwrite(encoded_rgb->data.ptr, image_size, 1, log_file);
-
-    fclose(log_file);
-  }
-
-  void compute_depth(const pair<fs::path, fs::path>& pair) {
-    // Heavily based on the demo program which ships with libelas.
-    cout << "Processing " << pair.first << ", " << pair.second << endl;
-
-    image<uchar> *left, *right;
-    left = loadPGM(pair.first.string().c_str());
-    right = loadPGM(pair.second.string().c_str());
-
-    // check for correct size
     if (left->width()<=0 || left->height() <=0 || right->width()<=0 || right->height() <=0 ||
         left->width()!=right->width() || left->height()!=right->height()) {
-      cout << "ERROR: Images must be of same size, but" << endl;
-      cout << "       left: " << left->width() <<  " x " << left->height() <<
-           ", right: " << right->width() <<  " x " << right->height() << endl;
-      delete left;
-      delete right;
-      return;
+      stringstream err;
+      err << "ERROR: Images must be of same size, but" << endl
+          << "       left: " << left->width() <<  " x " << left->height()
+          << ", right: " << right->width() <<  " x " << right->height() << endl;
+
+      // This also destroys the unique_ptr.
+      throw runtime_error(err.str());
     }
+
+    return result;
+  };
+
+  void compute_depth(const pair<fs::path, fs::path>& pair_fpaths) {
+    // Heavily based on the demo program which ships with libelas.
+    cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second << endl;
+    auto img_pair = load_stereo_pair(pair_fpaths);
+    auto left = img_pair->first, right = img_pair->second;
 
     // get image width and height
     int32_t width  = left->width();
@@ -201,7 +180,8 @@ namespace kitti2klg {
     // allocate memory for disparity image
     const int32_t dims[3] = {width, height, width}; // bytes per line = width
     float* D1_data = (float*)malloc(width*height*sizeof(float));
-    // TODO(andrei): Could we just not allocate this?
+    // TODO(andrei): Could we just NOT allocate this if only computing the
+    // depth map of the left frame?
     float* D2_data = (float*)malloc(width*height*sizeof(float));
 
     // process
@@ -227,22 +207,60 @@ namespace kitti2klg {
     }
 
     // Save disparity images in sibling to 'image_00' folder.
-    fs::path output = pair.first.parent_path().parent_path().parent_path();
+    fs::path output = pair_fpaths.first.parent_path().parent_path().parent_path();
     // TODO(andrei): Create this folder automatically if needed.
     output.append("depth");
-    output.append(pair.first.stem().string());
+    output.append(pair_fpaths.first.stem().string());
     output.concat(".depth.pgm");
-    cout << "Dumping depth map in [" << output << "]." << endl;
-    savePGM(D1, output.string().c_str());
-
-    // free memory
-    delete left;
-    delete right;
-    delete D1;
-    delete D2;
-    free(D1_data);
-    free(D2_data);
+    cout << "NOT dumping depth map in [" << output << "]." << endl;
+//    savePGM(D1, output.string().c_str());
   }
+
+  void write_kintinuous_log(const fs::path &kitti_sequence_root) {
+
+    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = get_kitti_stereo_pair_paths(kitti_sequence_root);
+    vector<long> timestamps = get_sequence_timestamps(kitti_sequence_root);
+
+    fs::path fpath = "test_dump.klg";
+    FILE *log_file = fopen(fpath.string().c_str(), "wb+");
+    int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
+    fwrite(&num_frames, sizeof(int32_t), 1, log_file);
+
+    // Kintinuous gets jpegs, and uses 'cvEncodeImage' to turn them into bytes,
+    // representing STILL JPEGS. We, sadly, have to do that as well.
+
+    for(const auto &pair: stereo_pair_fpaths) {
+      compute_depth(pair);
+
+      // free memory
+//      delete left;
+//      delete right;
+//      delete D1;
+//      delete D2;
+//      free(D1_data);
+//      free(D2_data);
+    }
+
+    // TODO(andrei): Read frame times from associated `timestamps.txt` files.
+    // However, each stream (left and right camera) have slightly different
+    // ones. Should we just use the left camera's stream? (Alternative:
+    // average left and right camera.)
+    int64_t frame_time = 0;
+    int32_t compressed_depth_size = 0;  // we use zlib to compress depth
+    // channel, and this is the size of the
+    // result.
+    // The width of the encoded jpeg.
+    int32_t image_size = 0; // encoded_image->width;
+
+    fwrite(&frame_time, sizeof(int64_t), 1, log_file);
+    fwrite(&compressed_depth_size, sizeof(int32_t), 1, log_file);
+    fwrite(&image_size, sizeof(int32_t), 1, log_file);
+//    fwrite(compressed_depth_buf, compressed_depth_size, 1, log_file);
+//    fwrite(encoded_rgb->data.ptr, image_size, 1, log_file);
+
+    fclose(log_file);
+  }
+
 
 }
 
@@ -251,9 +269,6 @@ int main() {
 
   std::cout << "Loading KITTI pairs from folder [] and outputting "
       "ElasticFusion/Kintinuous-friendly *.klg file." << std::endl;
-
-  // TODO(andrei): Docs + bash script for first converting pngs to pgms.
-
 
   fs::path kitti_root = kitti2klg::get_expanded_path("~/datasets/kitti");
   fs::path kitti_seq_path = kitti_root / "2011_09_26" / "2011_09_26_drive_0095_sync";

@@ -2,6 +2,9 @@
 cmake_minimum_required (VERSION 2.6)
 project (libelas)
 
+# We use OpenCV for handling various image formats.
+find_package(OpenCV REQUIRED)
+
 # directories
 set (LIBELAS_SRC_DIR src)
 
@@ -9,8 +12,8 @@ set (LIBELAS_SRC_DIR src)
 include_directories("${LIBELAS_SRC_DIR}")
 
 # use sse3 instruction set
-# also, enable c++14 support for neater filesystem interactions without
-# requiring boost or other utilities.
+# Also enable c++14 support for clean filesystem interactions without requiring
+# boost or other dependencies.
 SET(CMAKE_CXX_FLAGS "-msse3 -DPROFILE -O3 -std=c++14 -lstdc++fs")
 
 # sources
