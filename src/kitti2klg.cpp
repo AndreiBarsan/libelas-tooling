@@ -27,29 +27,34 @@ namespace kitti2klg {
 
   /**
    * @brief Get a list of filenames for KITTI stereo pairs.
-   * @param sequence_root The folder containing the desired KITTI sequence. The files
-   *    must be in the `pgm` format.
+   * @param sequence_root The folder containing the desired KITTI sequence.
+   * @param image_extension The extension of the image type to look for.
    *
    * @return A list of filename pairs containing the corresponding left and
    *    right grayscale image files for every frame.
    */
-  vector<stereo_fpath_pair> GetKittiStereoPairPaths(const fs::path &sequence_root) {
-    const string image_extension = ".pgm";
+  vector<stereo_fpath_pair> GetKittiStereoPairPaths(
+      const fs::path &sequence_root,
+      const string image_extension = ".pgm"
+  ) {
     fs::path left_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
     fs::path right_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
-    // TODO(andrei): Consider asserting both dirs have the same number of files.
 
     // Iterate through the left-image and the right-image directories
     // simultaneously, grabbing the file names along the way.
     vector<pair<fs::path, fs::path>> result;
-    for(fs::directory_iterator left_it = fs::begin(fs::directory_iterator(left_dir)),
-        right_it = fs::begin(fs::directory_iterator(right_dir));
-        left_it != fs::end(fs::directory_iterator(left_dir)) && right_it != fs::end(fs::directory_iterator(right_dir));
+    auto left_dir_it = fs::directory_iterator(left_dir);
+    auto right_dir_it = fs::directory_iterator(right_dir);
+    auto left_it = fs::begin(left_dir_it), right_it = fs::begin(right_dir_it);
+    for(; left_it != fs::end(left_dir_it) && right_it != fs::end(right_dir_it);
         ++left_it, ++right_it) {
       if (kitti2klg::EndsWith(left_it->path().string(), image_extension) &&
           kitti2klg::EndsWith(right_it->path().string(), image_extension)) {
         result.emplace_back(left_it->path(), right_it->path());
       }
+    }
+    if (left_it != fs::end(left_dir_it) || right_it != fs::end(right_dir_it)) {
+      throw runtime_error("Different frame counts in the two stereo folders.");
     }
 
     // Explicitly sort the paths so that they're in ascending order, since the
@@ -97,6 +102,7 @@ namespace kitti2klg {
     return timestamps;
   };
 
+  /// Loads an image. Currently only PGM is supported.
   image<uchar>* LoadImage(const fs::path &image_fpath) {
     // TODO(andrei): Use OpenCV, if necessary, and convert to image<uchar>.
     // Since the 'loadPGM' code just reads the raw PGM file, extracting width
@@ -127,6 +133,10 @@ namespace kitti2klg {
     return result;
   };
 
+  /// \brief Uses libelas to compute the depth map from a stereo pair.
+  /// Only computes the depth in the left camera's frame.
+  /// \param depth_out The preallocated depth map object, to be populated by
+  /// this function.
   void ComputeDepth(
       const image<uchar>* left,
       const image<uchar>* right,
@@ -138,10 +148,9 @@ namespace kitti2klg {
 
     // allocate memory for disparity image
     const int32_t dims[3] = {width, height, width}; // bytes per line = width
-    float* D1_data = (float*)malloc(width*height*sizeof(float));
-    // TODO(andrei): Could we just NOT allocate this if only computing the
-    // depth map of the left frame?
-    float* D2_data = (float*)malloc(width*height*sizeof(float));
+    float *D1_data = (float *) malloc(width * height * sizeof(float));
+    // 'D2_data' is necessary inside libelas, but not used by our code.
+    float *D2_data = (float *) malloc(width * height * sizeof(float));
 
     // process
     Elas::parameters param;
@@ -149,31 +158,62 @@ namespace kitti2klg {
     Elas elas(param);
     elas.process(left->data, right->data, D1_data, D2_data, dims);
 
-    // find maximum disparity for scaling output disparity images to [0..255]
+    // Find maximum disparity for scaling output disparity images to [0..255].
     float disp_max = 0;
-    for (int32_t i=0; i<width*height; i++) {
-      if (D1_data[i]>disp_max) disp_max = D1_data[i];
-//      if (D2_data[i]>disp_max) disp_max = D2_data[i];
+    for (int32_t i = 0; i < width * height; i++) {
+      if (D1_data[i] > disp_max) disp_max = D1_data[i];
     }
 
-    // TODO(andrei): Move this to own rendering function.
-    // copy float to uchar
-    for (int32_t i=0; i<width*height; i++) {
-      depth_out->data[i] = (uint8_t)max(255.0*D1_data[i]/disp_max,0.0);
+    // Copy float to uchar, after applying the [0..255] scaling.
+    for (int32_t i = 0; i < width * height; i++) {
+      depth_out->data[i] = (uint8_t) max(255.0 * D1_data[i] / disp_max, 0.0);
     }
 
-    // Save disparity images in sibling to 'image_00' folder.
-//    fs::path output = pair_fpaths.first.parent_path().parent_path().parent_path();
-    // TODO(andrei): Create this folder automatically if needed.
-//    output.append("depth");
-//    output.append(pair_fpaths.first.stem().string());
-//    output.concat(".depth.pgm");
-//    cout << "NOT dumping depth map in [" << output << "]." << endl;
-//    savePGM(D1, output.string().c_str());
-
-    // TODO(andrei): Reuse buffers.
     free(D1_data);
     free(D2_data);
+  }
+
+  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
+  CvMat* EncodeJpeg(const image<uchar> *const raw_image) {
+    int jpeg_params[] = {CV_IMWRITE_JPEG_QUALITY, 90, 0};
+    int width = raw_image->width();
+    int height = raw_image->height();
+
+//    cv::Vec<unsigned char, 1> *raw_gray_data = (cv::Vec<unsigned char, 1> *) raw_image->data;
+//    cv::Mat1b left_frame_mat(height, width, raw_gray_data->val);
+//    imencode(".jpg", left_frame_mat, out_jpeg_buf, jpeg_params);
+
+    // Small hack to ensure our dump has RGB channels, even if here, in this
+    // tool, we're just dealing with grayscale.
+    // TODO(andrei): Use grayscale pairs for depth as before, but pass the
+    // actual color left frame to this function.
+    IplImage *color_ipl_img = cvCreateImage(
+        cvSize(raw_image->width(), raw_image->height()), 
+        IPL_DEPTH_8U,
+        3);
+    IplImage *ipl_img = new IplImage();
+    cvCvtColor(ipl_img, color_ipl_img, CV_GRAY2BGR);
+
+
+    // We use the C-style API to be consistend with the Kintinuous ecosystem.
+    cv::Mat1b gray(height, width, raw_image->data);
+    IplImage *img = new IplImage(gray);
+    CvMat *encoded = cvEncodeImage(".jpg", img, jpeg_params);
+    return encoded;
+  }
+
+  /// Checks the return result of zlib's `compress2` function, throwing an
+  /// error of compression failed.
+  void check_compress2(int compress_result) {
+    if(compress_result == Z_BUF_ERROR) {
+      throw runtime_error("zlib Z_BUF_ERROR: Destination buffer too small.");
+    }
+    else if(compress_result == Z_MEM_ERROR) {
+      throw runtime_error("zlib Z_MEM_ERROR; Insufficient memory.");
+    }
+    else if(compress_result == Z_STREAM_ERROR) {
+      throw runtime_error("zlib Z_STREAM_ERROR: Unknown compression level.");
+    }
   }
 
   /// \brief Produces a Kintinuous-specific '.klg' file from a KITTI sequence.
@@ -187,7 +227,8 @@ namespace kitti2klg {
   /// \param kitti_sequence_root Root folder of a particular sequence from
   /// the KITTI dataset.
   ///
-  /// The expected format is (for each frame in the sequence):
+  /// The expected format first contains the number of frames, and then, for
+  /// each frame in the sequence:
   ///  * int64_t: timestamp
   ///  * int32_t: depthSize
   ///  * int32_t: imageSize
@@ -216,9 +257,8 @@ namespace kitti2klg {
       // The right camera frames have slightly different timestamps. For the
       // purpose of this experimental application, we should nevertheless be OK
       // to just use the left camera's timestamps.
-      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second << endl;
+      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second << flush;
       auto img_pair = LoadStereoPair(pair_fpaths);
-
       auto depth = make_shared<image<uchar>>(standard_width, standard_height);
 
       // get image width and height
@@ -229,53 +269,42 @@ namespace kitti2klg {
       }
 
       int64_t frame_timestamp = timestamps[i];
+      size_t raw_depth_size = width * height * sizeof(short);
+      ComputeDepth(img_pair->first, img_pair->second, depth.get());
       // This is the value we give to zlib, which then updates it to reflect
       // the resulting size of the data, after compression.
       size_t compressed_depth_actual_size = compressed_depth_buffer_size;
-      size_t raw_depth_size = width * height * sizeof(short);
-      ComputeDepth(img_pair->first, img_pair->second, depth.get());
 
       // Warning: 'compressed_depth_buf' will contain junk and residue from
       // previous frames beyond the indicated 'compressed_depth_actual_size'!
-      int compress_result = compress2(
+      check_compress2(compress2(
           compressed_depth_buf,
           &compressed_depth_actual_size,
           (const Bytef*) depth->data,
           raw_depth_size,
-          Z_BEST_SPEED);
-      if(compress_result == Z_BUF_ERROR) {
-        throw runtime_error("zlib Z_BUF_ERROR: Destination buffer too small.");
-      }
-      else if(compress_result == Z_MEM_ERROR) {
-        throw runtime_error("zlib Z_MEM_ERROR; Insufficient memory.");
-      }
-      else if(compress_result == Z_STREAM_ERROR) {
-        throw runtime_error("zlib Z_STREAM_ERROR: Unknown compression level.");
-      }
+          Z_BEST_SPEED));
 
-      float compression_ratio =
-          static_cast<float>(compressed_depth_actual_size) / raw_depth_size;
-      cout << "Depth compressed OK. Compressed result size: "
-           << compressed_depth_actual_size << "/" << raw_depth_size
-           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
+//      float compression_ratio =
+//          static_cast<float>(compressed_depth_actual_size) / raw_depth_size;
+//      cout << "Depth compressed OK. Compressed result size: "
+//           << compressed_depth_actual_size << "/" << raw_depth_size
+//           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
 
-      // TODO(andrei): Put the JPEG bullshit into its own utility.
-      vector<int> jpeg_params = {CV_IMWRITE_JPEG_QUALITY, 90, 0};
-      auto left_frame = img_pair->first;
-      cv::Vec<unsigned char, 1> *raw_gray_data = (cv::Vec<unsigned char, 1> *) left_frame->data;
-      cv::Mat1b left_frame_mat(height, width, raw_gray_data->val);
-
+      // Encode the left frame as a JPEG for the log.
       vector<uchar> out_jpeg_buf;
-      cv::imencode(".jpg", left_frame_mat, out_jpeg_buf, jpeg_params);
+      EncodeJpeg(img_pair->first, out_jpeg_buf);
       int32_t jpeg_size = static_cast<int32_t>(out_jpeg_buf.size());
 
-      // Dump stuff to the logfile. Because, obviously, protocol buffers are
-      // NOT a thing we could use.
+      cout << " OK." << flush;
+
+      // Write all the current frame information to the logfile.
       fwrite(&frame_timestamp, sizeof(int64_t), 1, log_file);
       fwrite(&compressed_depth_actual_size, sizeof(int32_t), 1, log_file);
       fwrite(&jpeg_size, sizeof(int32_t), 1, log_file);
       fwrite(compressed_depth_buf, compressed_depth_actual_size, 1, log_file);
       fwrite(out_jpeg_buf.data(), out_jpeg_buf.size(), 1, log_file);
+
+      cout << " Write OK." << endl;
     }
 
     free(compressed_depth_buf);

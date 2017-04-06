@@ -7,7 +7,8 @@
 namespace kitti2klg {
   namespace fs = std::experimental::filesystem;
 
-  inline bool EndsWith(const std::string& value, const std::string& ending);
+  /// Checks if 'value' ends with the specified 'ending'.
+  bool EndsWith(const std::string& value, const std::string& ending);
 
   /// Reads a full timestamp with nanosecond resolution seconds, such as
   /// "2011-09-26 15:20:11.552379904".

@@ -3,7 +3,7 @@
 
 namespace fs = std::experimental::filesystem;
 
-inline bool kitti2klg::EndsWith(const std::string &value, const std::string &ending){
+bool kitti2klg::EndsWith(const std::string &value, const std::string &ending){
   if (ending.size() > value.size()) {
     return false;
   } else {
