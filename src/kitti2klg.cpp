@@ -9,6 +9,8 @@
 
 #include <opencv2/opencv.hpp>
 #include <zlib.h>
+#include <execinfo.h>
+#include <csignal>
 
 #include "image.h"
 #include "elas.h"
@@ -66,7 +68,7 @@ namespace kitti2klg {
     sort(result.begin(), result.end(), compare_path_pairs);
 
     return result;
-  };;
+  };
 
   /**
    * NOTE: This only looks at the timestamps associated with the left
@@ -174,32 +176,35 @@ namespace kitti2klg {
   }
 
   /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
-  CvMat* EncodeJpeg(const image<uchar> *const raw_image) {
+  /// \return A 1D CvMat pointer to the compressed byte representation. The
+  /// caller takes ownership of this memory.
+  ///
+  /// \see EncodeJpeg(const image<uchar> * const)
+  CvMat* EncodeJpeg(const cv::Mat& image) {
+    // We will use the C-style OpenCV API for consistency with Kintinuous.
     int jpeg_params[] = {CV_IMWRITE_JPEG_QUALITY, 90, 0};
-    int width = raw_image->width();
-    int height = raw_image->height();
-
-//    cv::Vec<unsigned char, 1> *raw_gray_data = (cv::Vec<unsigned char, 1> *) raw_image->data;
-//    cv::Mat1b left_frame_mat(height, width, raw_gray_data->val);
-//    imencode(".jpg", left_frame_mat, out_jpeg_buf, jpeg_params);
 
     // Small hack to ensure our dump has RGB channels, even if here, in this
     // tool, we're just dealing with grayscale.
     // TODO(andrei): Use grayscale pairs for depth as before, but pass the
     // actual color left frame to this function.
-    IplImage *color_ipl_img = cvCreateImage(
-        cvSize(raw_image->width(), raw_image->height()), 
-        IPL_DEPTH_8U,
-        3);
-    IplImage *ipl_img = new IplImage();
-    cvCvtColor(ipl_img, color_ipl_img, CV_GRAY2BGR);
+    cv::Mat raw_mat_col = cv::Mat(image.size(), CV_8U);
+    cv::cvtColor(image, raw_mat_col, CV_GRAY2BGR);
+    IplImage *raw_ipl_col = new IplImage(raw_mat_col);
+    CvMat *encoded = cvEncodeImage(".jpg", raw_ipl_col, jpeg_params);
 
-
-    // We use the C-style API to be consistend with the Kintinuous ecosystem.
-    cv::Mat1b gray(height, width, raw_image->data);
-    IplImage *img = new IplImage(gray);
-    CvMat *encoded = cvEncodeImage(".jpg", img, jpeg_params);
+//    cvReleaseImage(&raw_ipl_col); // realising this here -> segfault.
     return encoded;
+  }
+
+  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
+  /// \return A 1D CvMat pointer to the compressed byte representation. The
+  /// caller takes ownership of this memory.
+  CvMat* EncodeJpeg(const image<uchar> * const raw_image) {
+    cv::Mat raw_mat = cv::Mat(cvSize(raw_image->width(), raw_image->height()),
+                              CV_8U,
+                              raw_image->data);
+    return EncodeJpeg(raw_mat);
   }
 
   /// Checks the return result of zlib's `compress2` function, throwing an
@@ -226,6 +231,9 @@ namespace kitti2klg {
   ///
   /// \param kitti_sequence_root Root folder of a particular sequence from
   /// the KITTI dataset.
+  /// \param output_path '*.klg' file to write the log to. Overwrites
+  /// existing files.
+  /// \param process_frames Number of frames to process. -1 means all.
   ///
   /// The expected format first contains the number of frames, and then, for
   /// each frame in the sequence:
@@ -236,28 +244,48 @@ namespace kitti2klg {
   ///  * imageSize * unsigned char: encodedImage->data.ptr
   ///
   /// \note Requires images from KITTI sequence to be in PGM format.
-  void BuildKintinuousLog(const fs::path &kitti_sequence_root) {
+  void BuildKintinuousLog(
+      const fs::path &kitti_sequence_root,
+      const fs::path &output_path,
+      const int process_frames) {
     vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
     vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
 
-    fs::path fpath = "test_dump.klg";
-    FILE *log_file = fopen(fpath.string().c_str(), "wb+");
+    // TODO(andrei): Flag to force resizing of all frames to arbitrary resolution.
+    // TODO(andrei): Split this method up into multiple chunks.
+    // TODO(andrei): If resizing is enabled, try computing the depth AFTER
+    // the resize. It may be slightly less accurate, but it could be much faster.
+
+    // Open the file and write the number of frames in the sequence.
+    FILE *log_file = fopen(output_path.string().c_str(), "wb+");
     int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
+    if (process_frames > -1 && process_frames < num_frames) {
+      num_frames = process_frames;
+    }
     fwrite(&num_frames, sizeof(int32_t), 1, log_file);
 
     // KITTI dataset standard stereo image size: 1242 x 375.
     int32_t standard_width = 1242;
     int32_t standard_height = 375;
+
+    // The target size we should reshape our frames to be.
+    cv::Size target_size(640, 480);
     size_t compressed_depth_buffer_size = standard_width * standard_height * sizeof(int16_t) * 4;
     uint8_t *compressed_depth_buf = (uint8_t*) malloc(compressed_depth_buffer_size);
 
     for(int i = 0; i < stereo_pair_fpaths.size(); ++i) {
+      if(process_frames > -1 && i >= process_frames) {
+        cout << "Stopping early after reaching fixed limit of " << process_frames
+             << " frames." << endl;
+        break;
+      }
+
       const auto &pair_fpaths = stereo_pair_fpaths[i];
       // Note: this is the timestamp associated with the left grayscale frame.
       // The right camera frames have slightly different timestamps. For the
       // purpose of this experimental application, we should nevertheless be OK
       // to just use the left camera's timestamps.
-      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second << flush;
+      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
       auto img_pair = LoadStereoPair(pair_fpaths);
       auto depth = make_shared<image<uchar>>(standard_width, standard_height);
 
@@ -269,18 +297,42 @@ namespace kitti2klg {
       }
 
       int64_t frame_timestamp = timestamps[i];
-      size_t raw_depth_size = width * height * sizeof(short);
       ComputeDepth(img_pair->first, img_pair->second, depth.get());
       // This is the value we give to zlib, which then updates it to reflect
       // the resulting size of the data, after compression.
       size_t compressed_depth_actual_size = compressed_depth_buffer_size;
 
+      cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
+                                CV_8U,
+                                depth->data);
+      cv::Mat depth_cv_16_bit(depth_cv.size(), CV_16U);
+      cv::Mat depth_cv_vga(target_size, CV_16U);
+
+      // This parameter ensures the full depth range of 0-255 is transferred
+      // properly when we switch to 16-bit depth (required by Kintinuous).
+      double alpha = 255.0;
+
+      // This is a parameter controlling the range of our depth. There should
+      // be ways of setting this based on, e.g., our stereo rig configuration.
+      double scale = 0.15;
+
+      // VERY IMPORTANT: You get very funky results in Kintinuous if you
+      // accidentally give it an 8-bit depth map. It misinterprets it by sort
+      // of splitting it up into what looks like footage meant for VR, i.e.,
+      // into two depthmaps. Make sure you give Kintinuous 16-bit depth!
+      // Ensure that our depth map is 16-bit, NOT 8-bit.
+      depth_cv.convertTo(depth_cv_16_bit, CV_16U, alpha * scale);
+      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
+      size_t raw_depth_size = depth_cv_vga.total() * depth_cv_vga.elemSize();
+
       // Warning: 'compressed_depth_buf' will contain junk and residue from
       // previous frames beyond the indicated 'compressed_depth_actual_size'!
+      // TODO(andrei): Try NO compression (NO JPEG and NO zlib). Kintinuous
+      // does support that, and it may not be necessary.
       check_compress2(compress2(
           compressed_depth_buf,
           &compressed_depth_actual_size,
-          (const Bytef*) depth->data,
+          (const Bytef*) depth_cv_vga.data,
           raw_depth_size,
           Z_BEST_SPEED));
 
@@ -291,39 +343,60 @@ namespace kitti2klg {
 //           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
 
       // Encode the left frame as a JPEG for the log.
-      vector<uchar> out_jpeg_buf;
-      EncodeJpeg(img_pair->first, out_jpeg_buf);
-      int32_t jpeg_size = static_cast<int32_t>(out_jpeg_buf.size());
+      cv::Mat left_frame_cv = cv::Mat(cvSize(img_pair->first->width(),
+                                             img_pair->first->height()),
+                                      CV_8U,
+                                      img_pair->first->data);
 
-      cout << " OK." << flush;
+      // TODO(andrei): Kintinuous is reading CV_8UC1. Should all our images use that format?
+      cv::Mat left_frame_vga;
+      cv::resize(left_frame_cv, left_frame_vga, target_size);
+      CvMat *encoded_rgb_jpeg_vga = EncodeJpeg(left_frame_vga);
+
+      int32_t jpeg_size = static_cast<int32_t>(encoded_rgb_jpeg_vga->width);
 
       // Write all the current frame information to the logfile.
       fwrite(&frame_timestamp, sizeof(int64_t), 1, log_file);
       fwrite(&compressed_depth_actual_size, sizeof(int32_t), 1, log_file);
       fwrite(&jpeg_size, sizeof(int32_t), 1, log_file);
       fwrite(compressed_depth_buf, compressed_depth_actual_size, 1, log_file);
-      fwrite(out_jpeg_buf.data(), out_jpeg_buf.size(), 1, log_file);
+      fwrite(encoded_rgb_jpeg_vga->data.ptr, static_cast<size_t>(jpeg_size), 1, log_file);
 
       cout << " Write OK." << endl;
+      cvReleaseMat(&encoded_rgb_jpeg_vga);
     }
 
     free(compressed_depth_buf);
     fflush(log_file);
     fclose(log_file);
   }
+}
 
+/// \brief Helper to print a stacktrace on SIGSEGV.
+void sig_handler(int sig) {
+  void *btrace[10];
+  int size = backtrace(btrace, 10);
 
+  fprintf(stderr, "Error: signal %d:\n", sig);
+  backtrace_symbols_fd(btrace, size, STDERR_FILENO);
+  exit(1);
 }
 
 int main() {
   namespace fs = std::experimental::filesystem;
-
-  std::cout << "Loading KITTI pairs from folder [] and outputting "
-      "ElasticFusion/Kintinuous-friendly *.klg file." << std::endl;
+  signal(SIGSEGV, sig_handler);
 
   fs::path kitti_root = kitti2klg::GetExpandedPath("~/datasets/kitti");
   fs::path kitti_seq_path = kitti_root / "2011_09_26" / "2011_09_26_drive_0095_sync";
-  kitti2klg::BuildKintinuousLog(kitti_seq_path);
+  fs::path output_path = "test_dump.klg";
 
+  // Number of kitti frames to process.
+  // TODO(andrei): Make this a command-line argument.
+  int process_frames = 250;
+
+  std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
+            << "] and outputting ElasticFusion/Kintinuous-friendly *.klg file"
+                " here: [" << output_path << "]." << std::endl;
+  kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, process_frames);
   return 0;
 }
