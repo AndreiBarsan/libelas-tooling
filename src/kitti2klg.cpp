@@ -305,6 +305,18 @@ namespace kitti2klg {
       cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
                                 CV_8U,
                                 depth->data);
+      // Invert the depth mask, since Kintinuous uses a different convention.
+      cv::Mat zero_mask = (depth_cv == 0);
+      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
+      // We must ensure that invalid pixels are still set to zero.
+      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
+
+      // Try to mark measurements which are too far away as invalid, since
+      // otherwise they can corrupt Kintinuous, it seems.
+      // TODO(andrei): Investigate this further.
+      cv::Mat far_mask = (depth_cv > 200);
+      depth_cv.setTo(cv::Scalar::all(0.0), far_mask);
+
       cv::Mat depth_cv_16_bit(depth_cv.size(), CV_16U);
       cv::Mat depth_cv_vga(target_size, CV_16U);
 
@@ -392,7 +404,7 @@ int main() {
 
   // Number of kitti frames to process.
   // TODO(andrei): Make this a command-line argument.
-  int process_frames = 250;
+  int process_frames = 100;
 
   std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
             << "] and outputting ElasticFusion/Kintinuous-friendly *.klg file"
