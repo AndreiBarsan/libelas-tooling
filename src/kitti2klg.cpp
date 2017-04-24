@@ -7,6 +7,9 @@
 #include <string>
 #include <vector>
 
+// TODO(andrei): If you decide to stick with gflags, mention them as a
+// dependency in the README.
+#include <gflags/gflags.h>
 #include <opencv2/opencv.hpp>
 #include <zlib.h>
 #include <execinfo.h>
@@ -26,6 +29,14 @@ namespace kitti2klg {
   const string KITTI_GRAYSCALE_RIGHT_FOLDER = "image_01";
   const string KITTI_COLOR_LEFT_FOLDER      = "image_02";
   const string KITTI_COLOR_RIGHT_FOLDER     = "image_03";
+
+  // Command-line argument definitions, using the elegant `gflags` library.
+  DEFINE_bool(infinitam, false, "Whether to generate InfiniTAM-style dump folders");
+  DEFINE_string(kitti_root, "", "Location of the input KITTI sequence.");
+  DEFINE_string(output, "out_log.klg", "Output file name (when using "
+      "Kintinuous logger format, folder when using InfiniTAM format).");
+  DEFINE_int32(process_frames, -1, "Number of frames to process. Set to -1 "
+      "to process the entire sequence.");
 
   /**
    * @brief Get a list of filenames for KITTI stereo pairs.
@@ -394,21 +405,35 @@ void sig_handler(int sig) {
   exit(1);
 }
 
-int main() {
+int main(int argc, char **argv) {
   namespace fs = std::experimental::filesystem;
+  using namespace std;
   signal(SIGSEGV, sig_handler);
 
-  fs::path kitti_root = kitti2klg::GetExpandedPath("~/datasets/kitti");
-  fs::path kitti_seq_path = kitti_root / "2011_09_26" / "2011_09_26_drive_0095_sync";
-  fs::path output_path = "test_dump.klg";
+  // Processes the command line arguments, and populates the FLAGS_* variables
+  // accordingly.
+  gflags::SetUsageMessage("Stereo-to-RGBD conversion utility.");
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  // Number of kitti frames to process.
-  // TODO(andrei): Make this a command-line argument.
-  int process_frames = 100;
+  if(kitti2klg::FLAGS_infinitam) {
+    cout << "Generating InfiniTAM dump folder." << endl;
+  }
+  else {
+    cout << "Generating Kintinuous log file." << endl;
+  }
+
+  if(kitti2klg::FLAGS_kitti_root.empty()) {
+    cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)." << endl;
+    exit(1);
+  }
+
+  //  "2011_09_26_drive_0095_sync" is a good demo sequence.
+  fs::path kitti_seq_path = kitti2klg::GetExpandedPath(kitti2klg::FLAGS_kitti_root);
+  fs::path output_path = kitti2klg::FLAGS_output;
 
   std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
             << "] and outputting ElasticFusion/Kintinuous-friendly *.klg file"
                 " here: [" << output_path << "]." << std::endl;
-  kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, process_frames);
+  kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
   return 0;
 }

@@ -41,5 +41,5 @@ list(APPEND KITTI2KLG_SRC_FILES "src/kitti2klg.cpp")
 add_executable(kitti2klg ${KITTI2KLG_SRC_FILES})
 
 # Ensure we also link OpenCV, zlib, as well as the modern C++ filesystem library.
-target_link_libraries(kitti2klg libstdc++fs.a ${ZLIB_LIBRARY} ${OpenCV_LIBS})
+target_link_libraries(kitti2klg libstdc++fs.a ${ZLIB_LIBRARY} ${OpenCV_LIBS} gflags)
 
