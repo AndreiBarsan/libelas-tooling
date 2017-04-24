@@ -14,6 +14,7 @@
 #include <zlib.h>
 #include <execinfo.h>
 #include <csignal>
+#include <iomanip>
 
 #include "image.h"
 #include "elas.h"
@@ -32,6 +33,7 @@ namespace kitti2klg {
 
   // Command-line argument definitions, using the elegant `gflags` library.
   DEFINE_bool(infinitam, false, "Whether to generate InfiniTAM-style dump folders");
+  //  "2011_09_26_drive_0095_sync" is a good demo sequence.
   DEFINE_string(kitti_root, "", "Location of the input KITTI sequence.");
   DEFINE_string(output, "out_log.klg", "Output file name (when using "
       "Kintinuous logger format, folder when using InfiniTAM format).");
@@ -393,6 +395,65 @@ namespace kitti2klg {
     fflush(log_file);
     fclose(log_file);
   }
+
+  // TODO(andrei): Refactor such that there is less code duplication between
+  // this method and `BuildKintinousLog`.
+  void BuildInfinitamLog(
+      const fs::path &kitti_sequence_root,
+      const fs::path &output_path,
+      const int process_frames) {
+    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(
+        kitti_sequence_root);
+    vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
+
+    int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
+//    if (process_frames > -1 && process_frames < num_frames) {
+//      num_frames = process_frames;
+//    }
+
+    // KITTI dataset standard stereo image size: 1242 x 375.
+    int32_t standard_width = 1242;
+    int32_t standard_height = 375;
+
+    // The target size we should reshape our frames to be.
+    cv::Size target_size(640, 480);
+
+    for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
+      if (process_frames > -1 && i >= process_frames) {
+        cout << "Stopping early after reaching fixed limit of "
+             << process_frames
+             << " frames." << endl;
+        break;
+      }
+
+      const auto &pair_fpaths = stereo_pair_fpaths[i];
+      // Note: this is the timestamp associated with the left grayscale frame.
+      // The right camera frames have slightly different timestamps. For the
+      // purpose of this experimental application, we should nevertheless be OK
+      // to just use the left camera's timestamps.
+      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
+      auto img_pair = LoadStereoPair(pair_fpaths);
+      auto depth = make_shared<image<uchar>>(standard_width, standard_height);
+
+      // get image width and height
+      int32_t width = img_pair->first->width();
+      int32_t height = img_pair->second->height();
+      if (width != standard_width || height != standard_height) {
+        throw runtime_error("Unexpected image dimensions encountered!");
+      }
+
+      ostringstream grayscale_fname;
+      grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
+
+      stringstream color_fname;
+      color_fname << setfill('0') << setw(4) << i << ".ppm";
+
+      fs::path grayscale_fpath = output_path / "Frames" / grayscale_fname.str();
+      fs::path color_fpath = output_path / "Frames" / color_fname.str();
+
+      cout << grayscale_fpath << " " << color_fpath << endl;
+    }
+  }
 }
 
 /// \brief Helper to print a stacktrace on SIGSEGV.
@@ -415,25 +476,27 @@ int main(int argc, char **argv) {
   gflags::SetUsageMessage("Stereo-to-RGBD conversion utility.");
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  if(kitti2klg::FLAGS_infinitam) {
-    cout << "Generating InfiniTAM dump folder." << endl;
-  }
-  else {
-    cout << "Generating Kintinuous log file." << endl;
-  }
-
   if(kitti2klg::FLAGS_kitti_root.empty()) {
     cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)." << endl;
     exit(1);
   }
 
-  //  "2011_09_26_drive_0095_sync" is a good demo sequence.
-  fs::path kitti_seq_path = kitti2klg::GetExpandedPath(kitti2klg::FLAGS_kitti_root);
+  fs::path kitti_seq_path = kitti2klg::FLAGS_kitti_root;
   fs::path output_path = kitti2klg::FLAGS_output;
 
-  std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
-            << "] and outputting ElasticFusion/Kintinuous-friendly *.klg file"
-                " here: [" << output_path << "]." << std::endl;
-  kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
+  cout << "Loading KITTI pairs from folder [" << kitti_seq_path << "] and outputting ";
+
+  if (kitti2klg::FLAGS_infinitam) {
+    cout << "InfiniTAM-friendly pgm+pbm dir here: [" << output_path << "]"
+         << endl;
+
+    // TODO(andrei): Rename this package accordingly.
+    kitti2klg::BuildInfinitamLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
+  }
+  else {
+    cout << "ElasticFusion/Kintinuous-friendly *.klg file here: ["
+         << output_path << "]." << endl;
+    kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
+  }
   return 0;
 }
