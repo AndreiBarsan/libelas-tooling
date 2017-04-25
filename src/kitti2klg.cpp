@@ -186,7 +186,9 @@ namespace kitti2klg {
     // Copy float to uchar, after applying the [0..255] scaling.
     for (int32_t i = 0; i < width * height; i++) {
       if (D1_data[i] < 0.0) {
-        cout << "Negative depth. is this invalid? " << D1_data[i] << endl;
+        if (D1_data[i] != kInvalidDepth) {
+          cout << "Negative depth. is this invalid? " << D1_data[i] << endl;
+        }
       }
       double depth = max(255.0 * D1_data[i] / disp_max, 0.0);
       depth_out->data[i] = (uint8_t) depth;

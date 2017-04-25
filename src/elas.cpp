@@ -794,10 +794,10 @@ void Elas::computeDisparity(vector<support_pt> p_support,vector<triangle> tri,in
   // init disparity image to -10
   if (param.subsampling) {
     for (int32_t i=0; i<(width/2)*(height/2); i++)
-      *(D+i) = INVALID_DEPTH;
+      *(D+i) = kInvalidDepth;
   } else {
     for (int32_t i=0; i<width*height; i++)
-      *(D+i) = INVALID_DEPTH;
+      *(D+i) = kInvalidDepth;
   }
   
   // pre-compute prior 
@@ -953,11 +953,11 @@ void Elas::leftRightConsistencyCheck(float* D1,float* D2) {
 
         // if check failed
         if (fabs(*(D2_copy+addr_warp)-d1)>param.lr_threshold)
-          *(D1+addr) = INVALID_DEPTH;
+          *(D1+addr) = kInvalidDepth;
         
       // set invalid
       } else
-        *(D1+addr) = INVALID_DEPTH;
+        *(D1+addr) = kInvalidDepth;
       
       // check if right disparity is valid
       if (d2>=0 && u_warp_2>=0 && u_warp_2<D_width) {       
@@ -967,11 +967,11 @@ void Elas::leftRightConsistencyCheck(float* D1,float* D2) {
 
         // if check failed
         if (fabs(*(D1_copy+addr_warp)-d2)>param.lr_threshold)
-          *(D2+addr) = INVALID_DEPTH;
+          *(D2+addr) = kInvalidDepth;
         
       // set invalid
       } else
-        *(D2+addr) = INVALID_DEPTH;
+        *(D2+addr) = kInvalidDepth;
     }
   }
   
@@ -1086,7 +1086,7 @@ void Elas::removeSmallSegments (float* D) {
           // for all pixels in current segment invalidate pixels
           for (int32_t i=0; i<seg_list_count; i++) {
             addr_curr = getAddressOffsetImage(*(seg_list_u+i),*(seg_list_v+i),D_width);
-            *(D+addr_curr) = INVALID_DEPTH;
+            *(D+addr_curr) = kInvalidDepth;
           }
         }
       } // end: if (*(I_done+addr_start)==0)
@@ -1305,8 +1305,8 @@ void Elas::adaptiveMean (float* D) {
   // weights of all valid disparities to 0 in this region)
   for (int32_t i=0; i<D_width*D_height; i++) {
     if (*(D+i)<0) {
-      *(D_copy+i) = INVALID_DEPTH;
-      *(D_tmp+i)  = INVALID_DEPTH;
+      *(D_copy+i) = kInvalidDepth;
+      *(D_tmp+i)  = kInvalidDepth;
     }
   }
   

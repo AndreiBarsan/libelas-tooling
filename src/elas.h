@@ -24,8 +24,6 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 #ifndef __ELAS_H__
 #define __ELAS_H__
 
-static const int INVALID_DEPTH = -10;
-
 #include <iostream>
 #include <stdio.h>
 #include <string.h>
@@ -50,6 +48,11 @@ static const int INVALID_DEPTH = -10;
 #ifdef PROFILE
 #include "timer.h"
 #endif
+
+// Used as a value at locations where disparity cannot be computed. Chosen
+// strategically, as the value '-10' makes the bilateral weights of all valid
+// disparities become 0 in an invalid region (see 'Elas::adaptiveMean').
+static const int kInvalidDepth = -10;
 
 class Elas {
   
