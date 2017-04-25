@@ -155,7 +155,7 @@ namespace kitti2klg {
   void ComputeDepth(
       const image<uchar>* left,
       const image<uchar>* right,
-      image<uchar> *depth_out
+      image<uint32_t> *depth_out
   ) {
     // Heavily based on the demo program which ships with libelas.
     int32_t width = left->width();
@@ -173,11 +173,29 @@ namespace kitti2klg {
     Elas elas(param);
     elas.process(left->data, right->data, D1_data, D2_data, dims);
 
+    // TODO(andrei): Pass these as parameters, you MONSTER.
+    float baseline_m = 0.571f;
+    float focal_length_px = 645.2f;
+
     // Find maximum disparity for scaling output disparity images to [0..255].
-    float disp_max = 0;
+//    float disp_max = 0;
+    float depth_max = 0;
     for (int32_t i = 0; i < width * height; i++) {
-      if (D1_data[i] > disp_max) disp_max = D1_data[i];
+//      if (D1_data[i] > disp_max) {
+      if (D1_data[i] > 0 && D1_data[i] != kInvalidDepth) {
+        float depth = (baseline_m * focal_length_px) / D1_data[i];
+        if (depth > depth_max) {
+          depth_max = depth;
+//        disp_max = D1_data[i];
+        }
+      }
     }
+
+    cout << "Max depth: " << depth_max << endl;
+
+    // Used for scaling the depth channel. Hacky; a proper formula
+    // taking the baseline into account is recommended in the long run.
+    double scale = 0.15;
 
     // TODO(andrei): This is not entirely correct; since we're working with
     // video, we should use a more consistent conversion than scaling based
@@ -185,13 +203,31 @@ namespace kitti2klg {
 
     // Copy float to uchar, after applying the [0..255] scaling.
     for (int32_t i = 0; i < width * height; i++) {
-      if (D1_data[i] < 0.0) {
-        if (D1_data[i] != kInvalidDepth) {
-          cout << "Negative depth. is this invalid? " << D1_data[i] << endl;
-        }
+      double depth;
+      if (D1_data[i] == kInvalidDepth) {
+        // Invalid depth marker in the output.
+        // TODO(andrei): Ensure InfiniTAM really recognizes this as missing
+        // data. Also, do this in an overall nicer fashion; right now we're
+        // just pretending invalid depths are super far away.
+        depth = 255;
       }
-      double depth = max(255.0 * D1_data[i] / disp_max, 0.0);
-      depth_out->data[i] = (uint8_t) depth;
+      else {
+        // TODO(andrei): When computing this, take the camera baseline into
+        // account, and compute true Z values.
+        // Z = (b * f) / disparity.
+
+        float disparity = D1_data[i];
+        depth = (baseline_m * focal_length_px) / disparity;
+
+        // TODO(andrei): Does this make sense?
+//        depth_max = 300;    // Hack.
+        depth = (depth / depth_max) * 255.0 * 255.0;
+
+//        depth = scale * (255.0 * D1_data[i] / disp_max);
+      }
+
+      // Output 16-bit depth values, in the Kinect style.
+      depth_out->data[i] = (uint16_t) depth;
     }
 
     free(D1_data);
@@ -201,6 +237,8 @@ namespace kitti2klg {
   /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
   /// \return A 1D CvMat pointer to the compressed byte representation. The
   /// caller takes ownership of this memory.
+  ///
+  /// Converts the image to BGR format before encoding it.
   ///
   /// \see EncodeJpeg(const image<uchar> * const)
   CvMat* EncodeJpeg(const cv::Mat& image) {
@@ -402,6 +440,7 @@ namespace kitti2klg {
       cv::resize(left_frame_cv, left_frame_vga, target_size);
       CvMat *encoded_rgb_jpeg_vga = EncodeJpeg(left_frame_vga);
 
+      // The encoded JPEG is stored as a row-matrix.
       int32_t jpeg_size = static_cast<int32_t>(encoded_rgb_jpeg_vga->width);
 
       // Write all the current frame information to the logfile.
@@ -474,8 +513,18 @@ namespace kitti2klg {
 
       ComputeDepth(img_pair->first, img_pair->second, depth.get());
       cv::Mat *depth_cv = ToCvMat(*depth);
-      cv::Mat depth_cv_vga;
-      cv::resize(*depth_cv, depth_cv_vga, target_size);
+      cv::Mat depth_cv_16_bit(depth_cv->size(), CV_16U);
+      float alpha = 255.0f;
+      depth_cv->convertTo(depth_cv_16_bit, CV_16U, alpha);
+
+      cv::Mat depth_cv_vga(target_size, CV_16U);
+      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
+
+//      for (int x = 0; x < depth_cv_vga.cols; ++x) {
+//        for (int y = 0; y < depth_cv_vga.rows; ++y) {
+//          cout << x << " " << y << ": " << depth_cv_vga.at<uint16_t>(y, x) << endl;
+//        }
+//      }
 
       ostringstream grayscale_fname;
       grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
@@ -487,8 +536,11 @@ namespace kitti2klg {
       fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
       cv::Mat *left_frame_cv = ToCvMat(*(img_pair->first));
+      cv::Mat left_frame_cv_col(left_frame_cv->size(), CV_8U);
+      cv::cvtColor(*left_frame_cv, left_frame_cv_col, CV_GRAY2BGR);
+
       cv::Mat left_frame_vga;
-      cv::resize(*left_frame_cv, left_frame_vga, target_size);
+      cv::resize(left_frame_cv_col, left_frame_vga, target_size);
 
       cv::imwrite(color_fpath, left_frame_vga);
       cv::imwrite(grayscale_fpath, depth_cv_vga);
