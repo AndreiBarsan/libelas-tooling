@@ -155,7 +155,7 @@ namespace kitti2klg {
   void ComputeDepth(
       const image<uchar>* left,
       const image<uchar>* right,
-      image<uint32_t> *depth_out
+      image<uint16_t> *depth_out
   ) {
     // Heavily based on the demo program which ships with libelas.
     int32_t width = left->width();
@@ -179,19 +179,19 @@ namespace kitti2klg {
 
     // Find maximum disparity for scaling output disparity images to [0..255].
 //    float disp_max = 0;
-    float depth_max = 0;
-    for (int32_t i = 0; i < width * height; i++) {
-//      if (D1_data[i] > disp_max) {
-      if (D1_data[i] > 0 && D1_data[i] != kInvalidDepth) {
-        float depth = (baseline_m * focal_length_px) / D1_data[i];
-        if (depth > depth_max) {
-          depth_max = depth;
-//        disp_max = D1_data[i];
-        }
-      }
-    }
+//    float depth_max = 0;
+//    for (int32_t i = 0; i < width * height; i++) {
+////      if (D1_data[i] > disp_max) {
+//      if (D1_data[i] > 0 && D1_data[i] != kInvalidDepth) {
+//        float depth = (baseline_m * focal_length_px) / D1_data[i];
+//        if (depth > depth_max) {
+//          depth_max = depth;
+////        disp_max = D1_data[i];
+//        }
+//      }
+//    }
 
-    cout << "Max depth: " << depth_max << endl;
+//    cout << "Max depth: " << depth_max << endl;
 
     // Used for scaling the depth channel. Hacky; a proper formula
     // taking the baseline into account is recommended in the long run.
@@ -201,6 +201,11 @@ namespace kitti2klg {
     // video, we should use a more consistent conversion than scaling based
     // on the maximum.
 
+    float min_depth = 50000;
+    int badover = 0;
+    int negatives = 0;  // Count for how many pixels our adjustment scheme
+    // would be too much.
+
     // Copy float to uchar, after applying the [0..255] scaling.
     for (int32_t i = 0; i < width * height; i++) {
       double depth;
@@ -209,26 +214,49 @@ namespace kitti2klg {
         // TODO(andrei): Ensure InfiniTAM really recognizes this as missing
         // data. Also, do this in an overall nicer fashion; right now we're
         // just pretending invalid depths are super far away.
-        depth = 255;
+        depth = 255.0 * 255.0;
       }
       else {
-        // TODO(andrei): When computing this, take the camera baseline into
-        // account, and compute true Z values.
+        // Compute depth from disparity. Note that the scale is likely WAY
+        // off, since the kinect sensor canonically spits things out in
+        // millimiters, but God knows what InfiniTAM expects.
         // Z = (b * f) / disparity.
-
+        // TODO(andrei): The disparity is simply computed in pixels, right?
         float disparity = D1_data[i];
-        depth = (baseline_m * focal_length_px) / disparity;
+        // meters * px / px * 1000 => millimeters
+
+        // Mild hack with the aim of squeezing more out of the 16-bit int range.
+//        float offset_m = 3.5;
+
+        depth = ((baseline_m * focal_length_px) / disparity) * 100.0;
+
+        if (depth < 0) {
+          negatives++;
+          depth = 0;
+        }
+
+        if (depth < min_depth) {
+          min_depth = depth;
+        }
+
+        if (depth > (1 << 16)) {
+          if (depth - 65535 > 500) {
+            badover++;
+          }
+
+          depth = 65535;
+        }
 
         // TODO(andrei): Does this make sense?
-//        depth_max = 300;    // Hack.
-        depth = (depth / depth_max) * 255.0 * 255.0;
-
-//        depth = scale * (255.0 * D1_data[i] / disp_max);
+//        depth = (depth / depth_max) * 255.0 * 255.0;
       }
 
       // Output 16-bit depth values, in the Kinect style.
       depth_out->data[i] = (uint16_t) depth;
     }
+
+    cout << "Min depth: " << min_depth << endl;
+    cout << "Bad depths:" << badover << " | Negatives: " << negatives << endl;
 
     free(D1_data);
     free(D2_data);
@@ -261,12 +289,19 @@ namespace kitti2klg {
   /// \brief Converts a grayscale libelas image to an OpenCV one.
   /// \return The same image as an OpenCV Mat. The caller takes ownership of
   /// this memory.
-  /// TODO-LOW(andrei): Make this function into a template to also support RGB images.
+  /// TODO-LOW(andrei): Make this function into a template to also support
+  /// RGB images and other image depths, reducing code duplication.
   /// TODO-LOW(andrei): Support target buffer to allow memory reuse.
   cv::Mat* ToCvMat(const image<uchar>& libelas_image) {
     CvSize size = cvSize(libelas_image.width(), libelas_image.height());
     return new cv::Mat(size, CV_8U, libelas_image.data);
   }
+
+  cv::Mat* ToCvMat(const image<uint16_t>& libelas_image) {
+    CvSize size = cvSize(libelas_image.width(), libelas_image.height());
+    return new cv::Mat(size, CV_16U, libelas_image.data);
+  }
+
 
   /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
   /// \return A 1D CvMat pointer to the compressed byte representation. The
@@ -316,148 +351,148 @@ namespace kitti2klg {
   ///  * imageSize * unsigned char: encodedImage->data.ptr
   ///
   /// \note Requires images from KITTI sequence to be in PGM format.
-  void BuildKintinuousLog(
-      const fs::path &kitti_sequence_root,
-      const fs::path &output_path,
-      const int process_frames) {
-    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
-    vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
-
-    // TODO(andrei): Flag to force resizing of all frames to arbitrary resolution.
-    // TODO(andrei): Split this method up into multiple chunks.
-    // TODO(andrei): If resizing is enabled, try computing the depth AFTER
-    // the resize. It may be slightly less accurate, but it could be much faster.
-
-    // Open the file and write the number of frames in the sequence.
-    FILE *log_file = fopen(output_path.string().c_str(), "wb+");
-    int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
-    if (process_frames > -1 && process_frames < num_frames) {
-      num_frames = process_frames;
-    }
-    fwrite(&num_frames, sizeof(int32_t), 1, log_file);
-
-    // KITTI dataset standard stereo image size: 1242 x 375.
-    int32_t standard_width = 1242;
-    int32_t standard_height = 375;
-
-    // The target size we should reshape our frames to be.
-    cv::Size target_size(640, 480);
-    size_t compressed_depth_buffer_size = standard_width * standard_height * sizeof(int16_t) * 4;
-    uint8_t *compressed_depth_buf = (uint8_t*) malloc(compressed_depth_buffer_size);
-
-    for(int i = 0; i < stereo_pair_fpaths.size(); ++i) {
-      if(process_frames > -1 && i >= process_frames) {
-        cout << "Stopping early after reaching fixed limit of " << process_frames
-             << " frames." << endl;
-        break;
-      }
-
-      const auto &pair_fpaths = stereo_pair_fpaths[i];
-      // Note: this is the timestamp associated with the left grayscale frame.
-      // The right camera frames have slightly different timestamps. For the
-      // purpose of this experimental application, we should nevertheless be OK
-      // to just use the left camera's timestamps.
-      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
-      auto img_pair = LoadStereoPair(pair_fpaths);
-      auto depth = make_shared<image<uchar>>(standard_width, standard_height);
-
-      // get image width and height
-      int32_t width  = img_pair->first->width();
-      int32_t height = img_pair->second->height();
-      if(width != standard_width || height != standard_height) {
-        throw runtime_error("Unexpected image dimensions encountered!");
-      }
-
-      int64_t frame_timestamp = timestamps[i];
-      ComputeDepth(img_pair->first, img_pair->second, depth.get());
-      // This is the value we give to zlib, which then updates it to reflect
-      // the resulting size of the data, after compression.
-      size_t compressed_depth_actual_size = compressed_depth_buffer_size;
-
-      cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
-                                CV_8U,
-                                depth->data);
-
-//      // Invert the depth mask, since Kintinuous uses a different convention.
-//      cv::Mat zero_mask = (depth_cv == 0);
-//      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
-//      // We must ensure that invalid pixels are still set to zero.
-//      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
-
-      // TODO(andrei): Consider moving these depth map operations to the depth
-      // map generation function.
-      // Try to mark measurements which are too far away as invalid, since
-      // otherwise they can corrupt Kintinuous, it seems.
-      // TODO(andrei): Investigate this further.
-      cv::Mat far_mask = (depth_cv > 200);
-      depth_cv.setTo(cv::Scalar::all(0.0), far_mask);
-
-      cv::Mat depth_cv_16_bit(depth_cv.size(), CV_16U);
-      cv::Mat depth_cv_vga(target_size, CV_16U);
-
-      // This parameter ensures the full depth range of 0-255 is transferred
-      // properly when we switch to 16-bit depth (required by Kintinuous).
-      double alpha = 255.0;
-
-      // This is a parameter controlling the range of our depth. There should
-      // be ways of setting this based on, e.g., our stereo rig configuration.
-      double scale = 0.15;
-
-      // VERY IMPORTANT: You get very funky results in Kintinuous if you
-      // accidentally give it an 8-bit depth map. It misinterprets it by sort
-      // of splitting it up into what looks like footage meant for VR, i.e.,
-      // into two depthmaps. Make sure you give Kintinuous 16-bit depth!
-      // Ensure that our depth map is 16-bit, NOT 8-bit.
-      depth_cv.convertTo(depth_cv_16_bit, CV_16U, alpha * scale);
-      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
-      size_t raw_depth_size = depth_cv_vga.total() * depth_cv_vga.elemSize();
-
-      // Warning: 'compressed_depth_buf' will contain junk and residue from
-      // previous frames beyond the indicated 'compressed_depth_actual_size'!
-      // TODO(andrei): Try NO compression (NO JPEG and NO zlib). Kintinuous
-      // does support that, and it may not be necessary.
-      check_compress2(compress2(
-          compressed_depth_buf,
-          &compressed_depth_actual_size,
-          (const Bytef*) depth_cv_vga.data,
-          raw_depth_size,
-          Z_BEST_SPEED));
-
-//      float compression_ratio =
-//          static_cast<float>(compressed_depth_actual_size) / raw_depth_size;
-//      cout << "Depth compressed OK. Compressed result size: "
-//           << compressed_depth_actual_size << "/" << raw_depth_size
-//           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
-
-      // Encode the left frame as a JPEG for the log.
-      cv::Mat left_frame_cv = cv::Mat(cvSize(img_pair->first->width(),
-                                             img_pair->first->height()),
-                                      CV_8U,
-                                      img_pair->first->data);
-
-      // TODO(andrei): Kintinuous is reading CV_8UC1. Should all our images use that format?
-      cv::Mat left_frame_vga;
-      cv::resize(left_frame_cv, left_frame_vga, target_size);
-      CvMat *encoded_rgb_jpeg_vga = EncodeJpeg(left_frame_vga);
-
-      // The encoded JPEG is stored as a row-matrix.
-      int32_t jpeg_size = static_cast<int32_t>(encoded_rgb_jpeg_vga->width);
-
-      // Write all the current frame information to the logfile.
-      fwrite(&frame_timestamp, sizeof(int64_t), 1, log_file);
-      fwrite(&compressed_depth_actual_size, sizeof(int32_t), 1, log_file);
-      fwrite(&jpeg_size, sizeof(int32_t), 1, log_file);
-      fwrite(compressed_depth_buf, compressed_depth_actual_size, 1, log_file);
-      fwrite(encoded_rgb_jpeg_vga->data.ptr, static_cast<size_t>(jpeg_size), 1, log_file);
-
-      cout << " Write OK." << endl;
-      cvReleaseMat(&encoded_rgb_jpeg_vga);
-    }
-
-    free(compressed_depth_buf);
-    fflush(log_file);
-    fclose(log_file);
-  }
+//  void BuildKintinuousLog(
+//      const fs::path &kitti_sequence_root,
+//      const fs::path &output_path,
+//      const int process_frames) {
+//    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
+//    vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
+//
+//    // TODO(andrei): Flag to force resizing of all frames to arbitrary resolution.
+//    // TODO(andrei): Split this method up into multiple chunks.
+//    // TODO(andrei): If resizing is enabled, try computing the depth AFTER
+//    // the resize. It may be slightly less accurate, but it could be much faster.
+//
+//    // Open the file and write the number of frames in the sequence.
+//    FILE *log_file = fopen(output_path.string().c_str(), "wb+");
+//    int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
+//    if (process_frames > -1 && process_frames < num_frames) {
+//      num_frames = process_frames;
+//    }
+//    fwrite(&num_frames, sizeof(int32_t), 1, log_file);
+//
+//    // KITTI dataset standard stereo image size: 1242 x 375.
+//    int32_t standard_width = 1242;
+//    int32_t standard_height = 375;
+//
+//    // The target size we should reshape our frames to be.
+//    cv::Size target_size(640, 480);
+//    size_t compressed_depth_buffer_size = standard_width * standard_height * sizeof(int16_t) * 4;
+//    uint8_t *compressed_depth_buf = (uint8_t*) malloc(compressed_depth_buffer_size);
+//
+//    for(int i = 0; i < stereo_pair_fpaths.size(); ++i) {
+//      if(process_frames > -1 && i >= process_frames) {
+//        cout << "Stopping early after reaching fixed limit of " << process_frames
+//             << " frames." << endl;
+//        break;
+//      }
+//
+//      const auto &pair_fpaths = stereo_pair_fpaths[i];
+//      // Note: this is the timestamp associated with the left grayscale frame.
+//      // The right camera frames have slightly different timestamps. For the
+//      // purpose of this experimental application, we should nevertheless be OK
+//      // to just use the left camera's timestamps.
+//      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
+//      auto img_pair = LoadStereoPair(pair_fpaths);
+//      auto depth = make_shared<image<uchar>>(standard_width, standard_height);
+//
+//      // get image width and height
+//      int32_t width  = img_pair->first->width();
+//      int32_t height = img_pair->second->height();
+//      if(width != standard_width || height != standard_height) {
+//        throw runtime_error("Unexpected image dimensions encountered!");
+//      }
+//
+//      int64_t frame_timestamp = timestamps[i];
+//      ComputeDepth(img_pair->first, img_pair->second, depth.get());
+//      // This is the value we give to zlib, which then updates it to reflect
+//      // the resulting size of the data, after compression.
+//      size_t compressed_depth_actual_size = compressed_depth_buffer_size;
+//
+//      cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
+//                                CV_8U,
+//                                depth->data);
+//
+////      // Invert the depth mask, since Kintinuous uses a different convention.
+////      cv::Mat zero_mask = (depth_cv == 0);
+////      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
+////      // We must ensure that invalid pixels are still set to zero.
+////      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
+//
+//      // TODO(andrei): Consider moving these depth map operations to the depth
+//      // map generation function.
+//      // Try to mark measurements which are too far away as invalid, since
+//      // otherwise they can corrupt Kintinuous, it seems.
+//      // TODO(andrei): Investigate this further.
+//      cv::Mat far_mask = (depth_cv > 200);
+//      depth_cv.setTo(cv::Scalar::all(0.0), far_mask);
+//
+//      cv::Mat depth_cv_16_bit(depth_cv.size(), CV_16U);
+//      cv::Mat depth_cv_vga(target_size, CV_16U);
+//
+//      // This parameter ensures the full depth range of 0-255 is transferred
+//      // properly when we switch to 16-bit depth (required by Kintinuous).
+//      double alpha = 255.0;
+//
+//      // This is a parameter controlling the range of our depth. There should
+//      // be ways of setting this based on, e.g., our stereo rig configuration.
+//      double scale = 0.15;
+//
+//      // VERY IMPORTANT: You get very funky results in Kintinuous if you
+//      // accidentally give it an 8-bit depth map. It misinterprets it by sort
+//      // of splitting it up into what looks like footage meant for VR, i.e.,
+//      // into two depthmaps. Make sure you give Kintinuous 16-bit depth!
+//      // Ensure that our depth map is 16-bit, NOT 8-bit.
+//      depth_cv.convertTo(depth_cv_16_bit, CV_16U, alpha * scale);
+//      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
+//      size_t raw_depth_size = depth_cv_vga.total() * depth_cv_vga.elemSize();
+//
+//      // Warning: 'compressed_depth_buf' will contain junk and residue from
+//      // previous frames beyond the indicated 'compressed_depth_actual_size'!
+//      // TODO(andrei): Try NO compression (NO JPEG and NO zlib). Kintinuous
+//      // does support that, and it may not be necessary.
+//      check_compress2(compress2(
+//          compressed_depth_buf,
+//          &compressed_depth_actual_size,
+//          (const Bytef*) depth_cv_vga.data,
+//          raw_depth_size,
+//          Z_BEST_SPEED));
+//
+////      float compression_ratio =
+////          static_cast<float>(compressed_depth_actual_size) / raw_depth_size;
+////      cout << "Depth compressed OK. Compressed result size: "
+////           << compressed_depth_actual_size << "/" << raw_depth_size
+////           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
+//
+//      // Encode the left frame as a JPEG for the log.
+//      cv::Mat left_frame_cv = cv::Mat(cvSize(img_pair->first->width(),
+//                                             img_pair->first->height()),
+//                                      CV_8U,
+//                                      img_pair->first->data);
+//
+//      // TODO(andrei): Kintinuous is reading CV_8UC1. Should all our images use that format?
+//      cv::Mat left_frame_vga;
+//      cv::resize(left_frame_cv, left_frame_vga, target_size);
+//      CvMat *encoded_rgb_jpeg_vga = EncodeJpeg(left_frame_vga);
+//
+//      // The encoded JPEG is stored as a row-matrix.
+//      int32_t jpeg_size = static_cast<int32_t>(encoded_rgb_jpeg_vga->width);
+//
+//      // Write all the current frame information to the logfile.
+//      fwrite(&frame_timestamp, sizeof(int64_t), 1, log_file);
+//      fwrite(&compressed_depth_actual_size, sizeof(int32_t), 1, log_file);
+//      fwrite(&jpeg_size, sizeof(int32_t), 1, log_file);
+//      fwrite(compressed_depth_buf, compressed_depth_actual_size, 1, log_file);
+//      fwrite(encoded_rgb_jpeg_vga->data.ptr, static_cast<size_t>(jpeg_size), 1, log_file);
+//
+//      cout << " Write OK." << endl;
+//      cvReleaseMat(&encoded_rgb_jpeg_vga);
+//    }
+//
+//    free(compressed_depth_buf);
+//    fflush(log_file);
+//    fclose(log_file);
+//  }
 
   // TODO(andrei): Refactor such that there is less code duplication between
   // this method and `BuildKintinousLog`.
@@ -500,7 +535,8 @@ namespace kitti2klg {
       // to just use the left camera's timestamps.
       cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
       auto img_pair = LoadStereoPair(pair_fpaths);
-      auto depth = make_shared<image<uchar>>(standard_width, standard_height);
+      auto depth = make_shared<image<uint16_t>>(standard_width,
+                                                standard_height);
 
       // get image width and height
       int32_t width  = img_pair->first->width();
@@ -513,12 +549,13 @@ namespace kitti2klg {
 
       ComputeDepth(img_pair->first, img_pair->second, depth.get());
       cv::Mat *depth_cv = ToCvMat(*depth);
-      cv::Mat depth_cv_16_bit(depth_cv->size(), CV_16U);
-      float alpha = 255.0f;
-      depth_cv->convertTo(depth_cv_16_bit, CV_16U, alpha);
+//      cv::Mat depth_cv_16_bit(depth_cv->size(), CV_16U);
+//      float alpha = 255.0f;
+//      depth_cv->convertTo(depth_cv_16_bit, CV_16U, alpha);
 
       cv::Mat depth_cv_vga(target_size, CV_16U);
-      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
+//      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
+      cv::resize(*depth_cv, depth_cv_vga, target_size);
 
 //      for (int x = 0; x < depth_cv_vga.cols; ++x) {
 //        for (int y = 0; y < depth_cv_vga.rows; ++y) {
@@ -595,7 +632,8 @@ int main(int argc, char **argv) {
     // Process the stereo data into a Kintinuous-style binary logfile
     // consisting of JPEG-compressed RGB frames and zipped (!) depth channels
     std::cout << "Kintinuous-friendly *.klg file here: [" << output_path << "]." << std::endl;
-    kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
+    std::cerr << "NOT enabled at the moment, sorry." << std::endl;
+//    kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
   }
 
   return 0;
