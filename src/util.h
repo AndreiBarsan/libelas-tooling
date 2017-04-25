@@ -35,6 +35,44 @@ namespace kitti2klg {
   /// \brief Convenient string formatting utility.
   /// Originally from StackOverflow: https://stackoverflow.com/questions/2342162/stdstring-formatting-like-sprintf
   std::string Format(const std::string& fmt, ...);
+
+  /// NOTE: This only looks at the timestamps associated with the left
+  /// greyscale images. There are also timestamps associated with each of the
+  /// other cameras, and they are not exactly identitcal. Nevertheless, this
+  /// approach should be good enough for the current application.
+  ///
+  /// \returns A vector of UTC timestamps at MICROSECOND resolution, necessary
+  ///   for the custom Kintinuous `.klg` format.
+  std::vector<long> GetSequenceTimestamps(const fs::path &root);
+
+  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
+  /// \return A 1D CvMat pointer to the compressed byte representation. The
+  /// caller takes ownership of this memory.
+  ///
+  /// Converts the image to BGR format before encoding it.
+  ///
+  /// \see EncodeJpeg(const image<uchar> * const)
+  CvMat *EncodeJpeg(const cv::Mat &image);
+
+  /// \brief Converts a grayscale libelas image to an OpenCV one.
+  /// \return The same image as an OpenCV Mat. The caller takes ownership of
+  /// this memory.
+  /// TODO-LOW(andrei): Make this function into a template to also support
+  /// RGB images and other image depths, reducing code duplication.
+  /// TODO-LOW(andrei): Support target buffer to allow memory reuse.
+  cv::Mat *ToCvMat(const image<uchar> &libelas_image);
+
+  cv::Mat *ToCvMat(const image<uint16_t> &libelas_image);
+
+  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
+  /// \return A 1D CvMat pointer to the compressed byte representation. The
+  /// caller takes ownership of this memory. CvMat is used for compatibility
+  /// reasons with the classic Kintinuous log file format.
+  CvMat *EncodeJpeg(const image <uchar> &raw_image);
+
+  /// Checks the return result of zlib's `compress2` function, throwing an
+  /// error if compression failed.
+  void check_compress2(int compress_result);
 }
 
 #endif // LIBELAS_UTIL_H

@@ -27,6 +27,7 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 #include <cstdlib>
 #include <climits>
 #include <cstring>
+#include <iostream>
 #include <fstream>
 
 // use imRef to access image data.
@@ -51,6 +52,11 @@ public:
   // create image
   image(const int width, const int height, const bool init = false);
 
+  // create image from existing data (e.g., loaded via OpenCV).
+  // Makes a copy of the given data. Supplied pointer must point to a grayscale
+  // image.
+  image(const int width, const int height, T *data);
+
   // delete image
   ~image();
 
@@ -74,20 +80,36 @@ private:
   int w, h;
 };
 
-template <class T> image<T>::image(const int width, const int height, const bool init) {
+template <class T> image<T>::image(const int width, const int height, const bool init_memory) {
   w = width;
   h = height;
   data = new T[w * h];  // allocate space for image data
   access = new T*[h];   // allocate space for row pointers
   
   // initialize row pointers
-  for (int i = 0; i < h; i++)
-    access[i] = data + (i * w);  
+  for (int i = 0; i < h; i++) {
+    access[i] = data + (i * w);
+  }
   
-  // init to zero
-  if (init)
+  if (init_memory) {
     memset(data, 0, w * h * sizeof(T));
+  }
 }
+
+template <class T> image<T>::image(const int width, const int height, T *data) {
+  w = width;
+  h = height;
+
+  this->data = new T[w * h];
+  memcpy(this->data, data, w * h);
+
+  // initialize row pointers
+  access = new T*[h];
+  for (int i = 0; i < h; i++) {
+    access[i] = data + (i * w);
+  }
+}
+
 
 template <class T> image<T>::~image() {
   delete [] data; 
@@ -110,58 +132,10 @@ template <class T> image<T> *image<T>::copy() const {
 
 class pnm_error {};
 
-void pnm_read(std::ifstream &file, char *buf) {
-  char doc[BUF_SIZE];
-  char c;
-  
-  file >> c;
-  while (c == '#') {
-    file.getline(doc, BUF_SIZE);
-    file >> c;
-  }
-  file.putback(c);
-  
-  file.width(BUF_SIZE);
-  file >> buf;
-  file.ignore();
-}
+void pnm_read(std::ifstream &file, char *buf);
 
-image<uchar> *loadPGM(const char *name) {
-  char buf[BUF_SIZE];
-  
-  // read header
-  std::ifstream file(name, std::ios::in | std::ios::binary);
-  pnm_read(file, buf);
-  if (strncmp(buf, "P5", 2)) {
-    std::cout << "ERROR: Could not read file " << name << std::endl;
-    throw pnm_error();
-  }
+image<uchar> *loadPGM(const char *name);
 
-  pnm_read(file, buf);
-  int width = atoi(buf);
-  pnm_read(file, buf);
-  int height = atoi(buf);
-
-  pnm_read(file, buf);
-  if (atoi(buf) > UCHAR_MAX) {
-    std::cout << "ERROR: Could not read file " << name << std::endl;
-    throw pnm_error();
-  }
-
-  // read data
-  image<uchar> *im = new image<uchar>(width, height);
-  file.read((char *)imPtr(im, 0, 0), width * height * sizeof(uchar));
-
-  return im;
-}
-
-void savePGM(image<uchar> *im, const char *name) {
-  int width = im->width();
-  int height = im->height();
-  std::ofstream file(name, std::ios::out | std::ios::binary);
-
-  file << "P5\n" << width << " " << height << "\n" << UCHAR_MAX << "\n";
-  file.write((char *)imPtr(im, 0, 0), width * height * sizeof(uchar));
-}
+void savePGM(image<uchar> *im, const char *name);
 
 #endif

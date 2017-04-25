@@ -34,7 +34,7 @@ set(CMAKE_BUILD_TYPE Release)
 # build demo program
 SET(LIBELAS_DEMO_SRC_FILES ${LIBELAS_SRC_FILES})
 list(APPEND LIBELAS_DEMO_SRC_FILES "src/main.cpp")
-add_executable(elas ${LIBELAS_DEMO_SRC_FILES})
+add_executable(elas ${LIBELAS_DEMO_SRC_FILES} src/config.h src/image.cpp)
 
 SET(KITTI2KLG_SRC_FILES ${LIBELAS_SRC_FILES})
 list(APPEND KITTI2KLG_SRC_FILES "src/kitti2klg.cpp")

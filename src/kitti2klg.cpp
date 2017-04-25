@@ -1,4 +1,3 @@
-#include <wordexp.h>
 
 #include <experimental/filesystem>
 #include <iostream>
@@ -14,8 +13,11 @@
 #include <zlib.h>
 #include <execinfo.h>
 #include <csignal>
+#include <limits>
 #include <iomanip>
+#include <wordexp.h>
 
+#include "config.h"
 #include "image.h"
 #include "elas.h"
 #include "util.h"
@@ -23,13 +25,10 @@
 namespace kitti2klg {
   using namespace std;
   namespace fs = std::experimental::filesystem;
-  using stereo_fpath_pair = std::pair<fs::path, fs::path>;
-  using stereo_image_pair = std::pair<image<uchar>*, image<uchar>*>;
 
-  const string KITTI_GRAYSCALE_LEFT_FOLDER  = "image_00";
-  const string KITTI_GRAYSCALE_RIGHT_FOLDER = "image_01";
-  const string KITTI_COLOR_LEFT_FOLDER      = "image_02";
-  const string KITTI_COLOR_RIGHT_FOLDER     = "image_03";
+  using stereo_fpath_pair = std::pair<fs::path, fs::path>;
+  using img_ptr = shared_ptr<image<uchar>>;
+  using stereo_image_pair = std::pair<img_ptr, img_ptr>;
 
   // Command-line argument definitions, using the elegant `gflags` library.
   DEFINE_bool(infinitam, false, "Whether to generate InfiniTAM-style dump folders");
@@ -50,7 +49,7 @@ namespace kitti2klg {
    */
   vector<stereo_fpath_pair> GetKittiStereoPairPaths(
       const fs::path &sequence_root,
-      const string image_extension = ".pgm"
+      const string image_extension = ".png"
   ) {
     fs::path left_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
     fs::path right_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
@@ -68,12 +67,14 @@ namespace kitti2klg {
         result.emplace_back(left_it->path(), right_it->path());
       }
     }
+
     if (left_it != fs::end(left_dir_it) || right_it != fs::end(right_dir_it)) {
       throw runtime_error("Different frame counts in the two stereo folders.");
     }
 
     // Explicitly sort the paths so that they're in ascending order, since the
-    // directory iterator does not guarantee it.
+    // directory iterator does not guarantee it, and it's useful to iterate
+    // through the frames in order when working on subsets of the data.
     auto compare_path_pairs = [](pair<fs::path, fs::path> stereo_pair_A,
                                  pair<fs::path, fs::path> stereo_pair_B) {
       return stereo_pair_A.first.filename().string() < stereo_pair_B.first.filename().string();
@@ -81,85 +82,99 @@ namespace kitti2klg {
     sort(result.begin(), result.end(), compare_path_pairs);
 
     return result;
-  };
-
-  /**
-   * NOTE: This only looks at the timestamps associated with the left
-   * greyscale images. There are also timestamps associated with each of the
-   * other cameras, and they are not exactly identitcal. Nevertheless, this
-   * approach should be good enough for the current application.
-   *
-   * @return A vector of UTC timestamps at MICROSECOND resolution, necessary
-   *    for the custom Kintinuous `.klg` format.
-   */
-  vector<long> GetSequenceTimestamps(const fs::path &root) {
-    fs::path timestamp_fpath = root;
-    timestamp_fpath.append(KITTI_GRAYSCALE_LEFT_FOLDER);
-    timestamp_fpath.append("timestamps.txt");
-
-    ifstream in(timestamp_fpath);
-
-    vector<long> timestamps;
-    string chunk;
-    while (getline(in, chunk, '\n')) {
-      tm time;
-      long nanosecond;
-      ReadTimestampWithNanoseconds(chunk, &time, &nanosecond);
-
-      // The format expected by Kintinuous uses microsecond resolution.
-      long microsecond = nanosecond / 1000;
-      time_t total_seconds = timegm(&time);
-      long total_microseconds = total_seconds * 1000 * 1000 + microsecond;
-
-      timestamps.push_back(total_microseconds);
-    }
-
-    return timestamps;
-  };
-
-  /// Loads an image. Currently only PGM is supported.
-  image<uchar>* LoadImage(const fs::path &image_fpath) {
-    // TODO(andrei): Use OpenCV, if necessary, and convert to image<uchar>.
-    // Since the 'loadPGM' code just reads the raw PGM file, extracting width
-    // and height and then and putting it into an array of uchars, it shouldn't
-    // be very difficult.
-    return loadPGM(image_fpath.string().c_str());
   }
 
-  unique_ptr<pair<image<uchar>*, image<uchar>*>> LoadStereoPair(
-      const pair<fs::path, fs::path>& pair_fpaths
-  ) {
-    auto result = make_unique<pair<image<uchar>*, image<uchar>*>>(
+  /// Loads an image. Currently only PGM and PNG are supported. The image is
+  /// loaded as grayscale, since that's all libelas cares about.
+  ///
+  /// \returns The loaded uchar image.
+  img_ptr LoadImage(const fs::path &image_fpath) {
+    if (! image_fpath.has_extension()) {
+      throw runtime_error(Format(
+          "Cannot load images without extensions, as format sniffing is "
+          "currently not supported. Problematic path: %s", image_fpath.string()));
+    }
+
+    if (image_fpath.extension() == ".png") {
+      cv::Mat img = cv::imread(image_fpath, CV_LOAD_IMAGE_ANYDEPTH);
+      return make_shared<image<uchar>>(img.cols, img.rows, img.data);
+    }
+    else if (image_fpath.extension() == ".pgm") {
+      return shared_ptr<image<uchar>>(loadPGM(image_fpath.string().c_str()));
+    }
+    else {
+      throw runtime_error(Format(
+          "Unsupported image format: %s", image_fpath.extension()));
+    }
+  }
+
+  unique_ptr<stereo_image_pair> LoadStereoPair(const stereo_fpath_pair& pair_fpaths) {
+    auto result = make_unique<stereo_image_pair>(
       LoadImage(pair_fpaths.first), LoadImage(pair_fpaths.second)
     );
-    auto left = result->first, right = result->second;
+    auto left = result->first;
+    auto right = result->second;
 
-    if (left->width()<=0 || left->height() <=0 || right->width()<=0 || right->height() <=0 ||
-        left->width()!=right->width() || left->height()!=right->height()) {
+    if (left->width()<=0 || left->height() <=0 || right->width()<=0 ||
+        right->height() <= 0 || left->width()!=right->width() ||
+        left->height()!=right->height()) {
       stringstream err;
       err << "ERROR: Images must be of same size, but" << endl
           << "       left: " << left->width() <<  " x " << left->height()
           << ", right: " << right->width() <<  " x " << right->height() << endl;
 
-      // This also destroys the unique_ptr.
+      // This also destroys the image pair unique_ptr.
       throw runtime_error(err.str());
     }
 
     return result;
   };
 
+  /// \brief Computes a metric depth value from the supplied disparity and
+  /// calibration parameters.
+  uint16_t DepthFromDisparity(float disparity_px, float baseline_m, float focal_length_px) {
+    if (disparity_px == kInvalidDepth) {
+      // If libelas flags this as an invalid depth measurement, we want to
+      // propagate that to the underlying SLAM system.
+      return USHRT_MAX;
+    }
+    else {
+      // Compute depth from disparity. Note that the scale is likely WAY
+      // off, since the kinect sensor canonically spits things out in
+      // millimiters, but God knows what InfiniTAM expects.
+      // Z = (b * f) / disparity.
+
+      // TODO(andrei): Double-check the fact that the disparity is expressed in pixels.
+      // meters * px / px * 100 => centimeters.
+      float depth_cm_f = ((baseline_m * focal_length_px) / disparity_px) *
+          100.0f * 5.0f;
+      uint16_t depth_cm_u = static_cast<uint16_t>(depth_cm_f);
+
+      // Ensure we don't flag things really far away as invalid (==USHRT_MAX).
+      if (depth_cm_u > USHRT_MAX - 1) {
+//        if (depth_cm - 65535 > 500) {
+//          badover++;
+//        }
+        depth_cm_u = USHRT_MAX - 1;
+      }
+
+      return depth_cm_u;
+    }
+  }
+
+
   /// \brief Uses libelas to compute the depth map from a stereo pair.
   /// Only computes the depth in the left camera's frame.
   /// \param depth_out The preallocated depth map object, to be populated by
   /// this function.
   void ComputeDepth(
-      const image<uchar>* left,
-      const image<uchar>* right,
+      const image<uchar>& left,
+      const image<uchar>& right,
       image<uint16_t> *depth_out
   ) {
     // Heavily based on the demo program which ships with libelas.
-    int32_t width = left->width();
-    int32_t height = left->height();
+    int32_t width = left.width();
+    int32_t height = left.height();
 
     // allocate memory for disparity image
     const int32_t dims[3] = {width, height, width}; // bytes per line = width
@@ -171,162 +186,23 @@ namespace kitti2klg {
     Elas::parameters param;
     param.postprocess_only_left = true;
     Elas elas(param);
-    elas.process(left->data, right->data, D1_data, D2_data, dims);
+    elas.process(left.data, right.data, D1_data, D2_data, dims);
 
     // TODO(andrei): Pass these as parameters, you MONSTER.
     float baseline_m = 0.571f;
     float focal_length_px = 645.2f;
 
-    // Find maximum disparity for scaling output disparity images to [0..255].
-//    float disp_max = 0;
-//    float depth_max = 0;
-//    for (int32_t i = 0; i < width * height; i++) {
-////      if (D1_data[i] > disp_max) {
-//      if (D1_data[i] > 0 && D1_data[i] != kInvalidDepth) {
-//        float depth = (baseline_m * focal_length_px) / D1_data[i];
-//        if (depth > depth_max) {
-//          depth_max = depth;
-////        disp_max = D1_data[i];
-//        }
-//      }
-//    }
-
-//    cout << "Max depth: " << depth_max << endl;
-
-    // Used for scaling the depth channel. Hacky; a proper formula
-    // taking the baseline into account is recommended in the long run.
-    double scale = 0.15;
-
-    // TODO(andrei): This is not entirely correct; since we're working with
-    // video, we should use a more consistent conversion than scaling based
-    // on the maximum.
-
-    float min_depth = 50000;
-    int badover = 0;
-    int negatives = 0;  // Count for how many pixels our adjustment scheme
-    // would be too much.
-
-    // Copy float to uchar, after applying the [0..255] scaling.
+    // Convert the float disparity map to 16-bit unsigned int depth map,
+    // expressed in centimeters.
     for (int32_t i = 0; i < width * height; i++) {
-      double depth;
-      if (D1_data[i] == kInvalidDepth) {
-        // Invalid depth marker in the output.
-        // TODO(andrei): Ensure InfiniTAM really recognizes this as missing
-        // data. Also, do this in an overall nicer fashion; right now we're
-        // just pretending invalid depths are super far away.
-        depth = 255.0 * 255.0;
-      }
-      else {
-        // Compute depth from disparity. Note that the scale is likely WAY
-        // off, since the kinect sensor canonically spits things out in
-        // millimiters, but God knows what InfiniTAM expects.
-        // Z = (b * f) / disparity.
-        // TODO(andrei): The disparity is simply computed in pixels, right?
-        float disparity = D1_data[i];
-        // meters * px / px * 1000 => millimeters
-
-        // Mild hack with the aim of squeezing more out of the 16-bit int range.
-//        float offset_m = 3.5;
-
-        depth = ((baseline_m * focal_length_px) / disparity) * 100.0;
-
-        if (depth < 0) {
-          negatives++;
-          depth = 0;
-        }
-
-        if (depth < min_depth) {
-          min_depth = depth;
-        }
-
-        if (depth > (1 << 16)) {
-          if (depth - 65535 > 500) {
-            badover++;
-          }
-
-          depth = 65535;
-        }
-
-        // TODO(andrei): Does this make sense?
-//        depth = (depth / depth_max) * 255.0 * 255.0;
-      }
-
       // Output 16-bit depth values, in the Kinect style.
-      depth_out->data[i] = (uint16_t) depth;
+      depth_out->data[i] = DepthFromDisparity(D1_data[i], baseline_m, focal_length_px);
     }
-
-    cout << "Min depth: " << min_depth << endl;
-    cout << "Bad depths:" << badover << " | Negatives: " << negatives << endl;
 
     free(D1_data);
     free(D2_data);
   }
 
-  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
-  /// \return A 1D CvMat pointer to the compressed byte representation. The
-  /// caller takes ownership of this memory.
-  ///
-  /// Converts the image to BGR format before encoding it.
-  ///
-  /// \see EncodeJpeg(const image<uchar> * const)
-  CvMat* EncodeJpeg(const cv::Mat& image) {
-    // We will use the C-style OpenCV API for consistency with Kintinuous.
-    int jpeg_params[] = {CV_IMWRITE_JPEG_QUALITY, 90, 0};
-
-    // Small hack to ensure our dump has RGB channels, even if here, in this
-    // tool, we're just dealing with grayscale.
-    // TODO(andrei): Use grayscale pairs for depth as before, but pass the
-    // actual color left frame to this function.
-    cv::Mat raw_mat_col = cv::Mat(image.size(), CV_8U);
-    cv::cvtColor(image, raw_mat_col, CV_GRAY2BGR);
-    IplImage *raw_ipl_col = new IplImage(raw_mat_col);
-    CvMat *encoded = cvEncodeImage(".jpg", raw_ipl_col, jpeg_params);
-
-//    cvReleaseImage(&raw_ipl_col); // realising this here -> segfault.
-    return encoded;
-  }
-
-  /// \brief Converts a grayscale libelas image to an OpenCV one.
-  /// \return The same image as an OpenCV Mat. The caller takes ownership of
-  /// this memory.
-  /// TODO-LOW(andrei): Make this function into a template to also support
-  /// RGB images and other image depths, reducing code duplication.
-  /// TODO-LOW(andrei): Support target buffer to allow memory reuse.
-  cv::Mat* ToCvMat(const image<uchar>& libelas_image) {
-    CvSize size = cvSize(libelas_image.width(), libelas_image.height());
-    return new cv::Mat(size, CV_8U, libelas_image.data);
-  }
-
-  cv::Mat* ToCvMat(const image<uint16_t>& libelas_image) {
-    CvSize size = cvSize(libelas_image.width(), libelas_image.height());
-    return new cv::Mat(size, CV_16U, libelas_image.data);
-  }
-
-
-  /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
-  /// \return A 1D CvMat pointer to the compressed byte representation. The
-  /// caller takes ownership of this memory. CvMat is used for compatibility
-  /// reasons with the classic Kintinuous log file format.
-  CvMat* EncodeJpeg(const image<uchar>& raw_image) {
-    cv::Mat *raw_mat = ToCvMat(raw_image);
-    CvMat *jpeg = EncodeJpeg(*raw_mat);
-    delete raw_mat;
-    return jpeg;
-  }
-
-  /// Checks the return result of zlib's `compress2` function, throwing an
-  /// error of compression failed.
-  void check_compress2(int compress_result) {
-    if(compress_result == Z_BUF_ERROR) {
-      throw runtime_error("zlib Z_BUF_ERROR: Destination buffer too small.");
-    }
-    else if(compress_result == Z_MEM_ERROR) {
-      throw runtime_error("zlib Z_MEM_ERROR; Insufficient memory.");
-    }
-    else if(compress_result == Z_STREAM_ERROR) {
-      throw runtime_error("zlib Z_STREAM_ERROR: Unknown compression level.");
-    }
-  }
 
   /// \brief Produces a Kintinuous-specific '.klg' file from a KITTI sequence.
   ///
@@ -499,10 +375,15 @@ namespace kitti2klg {
   void BuildInfinitamLog(
       const fs::path &kitti_sequence_root,
       const fs::path &output_path,
-      const int process_frames) {
-    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(
-        kitti_sequence_root);
-    vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
+      const int process_frames
+  ) {
+    if (! fs::exists(kitti_sequence_root)) {
+      cerr << "Could not find KITTI dataset root directory at: "
+           << kitti_sequence_root << "." << endl;
+      return;
+    }
+
+    vector<stereo_fpath_pair> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
 
     fs::path frames_folder = output_path / "Frames";
     if (! fs::exists(frames_folder)) {
@@ -512,10 +393,8 @@ namespace kitti2klg {
     }
 
     int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
+    cout << "Found: " << num_frames << " frames to process." << endl;
 
-    // KITTI dataset standard stereo image size: 1242 x 375.
-    int32_t standard_width = 1242;
-    int32_t standard_height = 375;
 
     // The target size we should reshape our frames to be.
     cv::Size target_size(640, 480);
@@ -535,37 +414,25 @@ namespace kitti2klg {
       // to just use the left camera's timestamps.
       cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
       auto img_pair = LoadStereoPair(pair_fpaths);
-      auto depth = make_shared<image<uint16_t>>(standard_width,
-                                                standard_height);
 
       // get image width and height
       int32_t width  = img_pair->first->width();
       int32_t height = img_pair->second->height();
-      if(width != standard_width || height != standard_height) {
+      if(width != kKittiFrameWidth || height != kKittiFrameHeight) {
         throw runtime_error(Format(
             "Unexpected image dimensions encountered! Was assuming standard "
-            "KITTI frame dimensions of %d x %d.", standard_width, standard_height));
+            "KITTI frame dimensions of %d x %d.", kKittiFrameWidth, kKittiFrameHeight));
       }
 
-      ComputeDepth(img_pair->first, img_pair->second, depth.get());
+      auto depth = make_shared<image<uint16_t>>(width, height);
+      ComputeDepth(*(img_pair->first), *(img_pair->second), depth.get());
       cv::Mat *depth_cv = ToCvMat(*depth);
-//      cv::Mat depth_cv_16_bit(depth_cv->size(), CV_16U);
-//      float alpha = 255.0f;
-//      depth_cv->convertTo(depth_cv_16_bit, CV_16U, alpha);
 
-      cv::Mat depth_cv_vga(target_size, CV_16U);
-//      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
-      cv::resize(*depth_cv, depth_cv_vga, target_size);
-
-//      for (int x = 0; x < depth_cv_vga.cols; ++x) {
-//        for (int y = 0; y < depth_cv_vga.rows; ++y) {
-//          cout << x << " " << y << ": " << depth_cv_vga.at<uint16_t>(y, x) << endl;
-//        }
-//      }
+      cv::Mat depth_cv_resized(target_size, CV_16U);
+      cv::resize(*depth_cv, depth_cv_resized, target_size);
 
       ostringstream grayscale_fname;
       grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
-
       stringstream color_fname;
       color_fname << setfill('0') << setw(4) << i << ".ppm";
 
@@ -580,7 +447,7 @@ namespace kitti2klg {
       cv::resize(left_frame_cv_col, left_frame_vga, target_size);
 
       cv::imwrite(color_fpath, left_frame_vga);
-      cv::imwrite(grayscale_fpath, depth_cv_vga);
+      cv::imwrite(grayscale_fpath, depth_cv_resized);
 
       delete left_frame_cv;
       delete depth_cv;
