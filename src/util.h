@@ -3,6 +3,8 @@
 
 #include <experimental/filesystem>
 #include <string>
+#include <cstdarg>
+#include <cstring>
 
 namespace kitti2klg {
   namespace fs = std::experimental::filesystem;
@@ -29,6 +31,10 @@ namespace kitti2klg {
   /// \param raw_path Unexpanded UNIX path, e.g., `~/work` or `${HOME}/work`.
   /// \return Typesafe C++ object containing the expanded path.
   fs::path GetExpandedPath(const std::string& raw_path);
+
+  /// \brief Convenient string formatting utility.
+  /// Originally from StackOverflow: https://stackoverflow.com/questions/2342162/stdstring-formatting-like-sprintf
+  std::string Format(const std::string& fmt, ...);
 }
 
-#endif //LIBELAS_UTIL_H
+#endif // LIBELAS_UTIL_H

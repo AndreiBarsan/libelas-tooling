@@ -179,9 +179,17 @@ namespace kitti2klg {
       if (D1_data[i] > disp_max) disp_max = D1_data[i];
     }
 
+    // TODO(andrei): This is not entirely correct; since we're working with
+    // video, we should use a more consistent conversion than scaling based
+    // on the maximum.
+
     // Copy float to uchar, after applying the [0..255] scaling.
     for (int32_t i = 0; i < width * height; i++) {
-      depth_out->data[i] = (uint8_t) max(255.0 * D1_data[i] / disp_max, 0.0);
+      if (D1_data[i] < 0.0) {
+        cout << "Negative depth. is this invalid? " << D1_data[i] << endl;
+      }
+      double depth = max(255.0 * D1_data[i] / disp_max, 0.0);
+      depth_out->data[i] = (uint8_t) depth;
     }
 
     free(D1_data);
@@ -210,14 +218,25 @@ namespace kitti2klg {
     return encoded;
   }
 
+  /// \brief Converts a grayscale libelas image to an OpenCV one.
+  /// \return The same image as an OpenCV Mat. The caller takes ownership of
+  /// this memory.
+  /// TODO-LOW(andrei): Make this function into a template to also support RGB images.
+  /// TODO-LOW(andrei): Support target buffer to allow memory reuse.
+  cv::Mat* ToCvMat(const image<uchar>& libelas_image) {
+    CvSize size = cvSize(libelas_image.width(), libelas_image.height());
+    return new cv::Mat(size, CV_8U, libelas_image.data);
+  }
+
   /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
   /// \return A 1D CvMat pointer to the compressed byte representation. The
-  /// caller takes ownership of this memory.
-  CvMat* EncodeJpeg(const image<uchar> * const raw_image) {
-    cv::Mat raw_mat = cv::Mat(cvSize(raw_image->width(), raw_image->height()),
-                              CV_8U,
-                              raw_image->data);
-    return EncodeJpeg(raw_mat);
+  /// caller takes ownership of this memory. CvMat is used for compatibility
+  /// reasons with the classic Kintinuous log file format.
+  CvMat* EncodeJpeg(const image<uchar>& raw_image) {
+    cv::Mat *raw_mat = ToCvMat(raw_image);
+    CvMat *jpeg = EncodeJpeg(*raw_mat);
+    delete raw_mat;
+    return jpeg;
   }
 
   /// Checks the return result of zlib's `compress2` function, throwing an
@@ -318,12 +337,15 @@ namespace kitti2klg {
       cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
                                 CV_8U,
                                 depth->data);
-      // Invert the depth mask, since Kintinuous uses a different convention.
-      cv::Mat zero_mask = (depth_cv == 0);
-      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
-      // We must ensure that invalid pixels are still set to zero.
-      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
 
+//      // Invert the depth mask, since Kintinuous uses a different convention.
+//      cv::Mat zero_mask = (depth_cv == 0);
+//      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
+//      // We must ensure that invalid pixels are still set to zero.
+//      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
+
+      // TODO(andrei): Consider moving these depth map operations to the depth
+      // map generation function.
       // Try to mark measurements which are too far away as invalid, since
       // otherwise they can corrupt Kintinuous, it seems.
       // TODO(andrei): Investigate this further.
@@ -406,10 +428,14 @@ namespace kitti2klg {
         kitti_sequence_root);
     vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
 
+    fs::path frames_folder = output_path / "Frames";
+    if (! fs::exists(frames_folder)) {
+      cout << "Output directory did not exist. Creating: " << frames_folder
+           << endl;
+      fs::create_directories(frames_folder);
+    }
+
     int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
-//    if (process_frames > -1 && process_frames < num_frames) {
-//      num_frames = process_frames;
-//    }
 
     // KITTI dataset standard stereo image size: 1242 x 375.
     int32_t standard_width = 1242;
@@ -436,11 +462,18 @@ namespace kitti2klg {
       auto depth = make_shared<image<uchar>>(standard_width, standard_height);
 
       // get image width and height
-      int32_t width = img_pair->first->width();
+      int32_t width  = img_pair->first->width();
       int32_t height = img_pair->second->height();
-      if (width != standard_width || height != standard_height) {
-        throw runtime_error("Unexpected image dimensions encountered!");
+      if(width != standard_width || height != standard_height) {
+        throw runtime_error(Format(
+            "Unexpected image dimensions encountered! Was assuming standard "
+            "KITTI frame dimensions of %d x %d.", standard_width, standard_height));
       }
+
+      ComputeDepth(img_pair->first, img_pair->second, depth.get());
+      cv::Mat *depth_cv = ToCvMat(*depth);
+      cv::Mat depth_cv_vga;
+      cv::resize(*depth_cv, depth_cv_vga, target_size);
 
       ostringstream grayscale_fname;
       grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
@@ -451,7 +484,16 @@ namespace kitti2klg {
       fs::path grayscale_fpath = output_path / "Frames" / grayscale_fname.str();
       fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
-      cout << grayscale_fpath << " " << color_fpath << endl;
+      cv::Mat *left_frame_cv = ToCvMat(*(img_pair->first));
+      cv::Mat left_frame_vga;
+      cv::resize(*left_frame_cv, left_frame_vga, target_size);
+
+      cv::imwrite(color_fpath, left_frame_vga);
+      cv::imwrite(grayscale_fpath, depth_cv_vga);
+
+      delete left_frame_cv;
+      delete depth_cv;
+      cout << " OK." << endl;
     }
   }
 }
@@ -468,7 +510,6 @@ void sig_handler(int sig) {
 
 int main(int argc, char **argv) {
   namespace fs = std::experimental::filesystem;
-  using namespace std;
   signal(SIGSEGV, sig_handler);
 
   // Processes the command line arguments, and populates the FLAGS_* variables
@@ -477,26 +518,31 @@ int main(int argc, char **argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   if(kitti2klg::FLAGS_kitti_root.empty()) {
-    cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)." << endl;
+    std::cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)."
+              << std::endl;
     exit(1);
   }
 
   fs::path kitti_seq_path = kitti2klg::FLAGS_kitti_root;
   fs::path output_path = kitti2klg::FLAGS_output;
 
-  cout << "Loading KITTI pairs from folder [" << kitti_seq_path << "] and outputting ";
+  std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
+            << "] and outputting ";
 
   if (kitti2klg::FLAGS_infinitam) {
-    cout << "InfiniTAM-friendly pgm+pbm dir here: [" << output_path << "]"
-         << endl;
+    // Process the stereo data into an InfiniTAM-style folder consisting of
+    // `pgm` RGB images and `pbm` grayscale depth images.
+    std::cout << "InfiniTAM-friendly pgm+pbm dir here: [" << output_path << "]" << std::endl;
 
     // TODO(andrei): Rename this package accordingly.
     kitti2klg::BuildInfinitamLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
   }
   else {
-    cout << "ElasticFusion/Kintinuous-friendly *.klg file here: ["
-         << output_path << "]." << endl;
+    // Process the stereo data into a Kintinuous-style binary logfile
+    // consisting of JPEG-compressed RGB frames and zipped (!) depth channels
+    std::cout << "Kintinuous-friendly *.klg file here: [" << output_path << "]." << std::endl;
     kitti2klg::BuildKintinuousLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
   }
+
   return 0;
 }
