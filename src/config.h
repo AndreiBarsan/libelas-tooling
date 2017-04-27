@@ -13,6 +13,7 @@ namespace kitti2klg {
   // KITTI dataset standard stereo image size: 1242 x 375.
   static const int kKittiFrameWidth = 1242;
   static const int kKittiFrameHeight = 375;
+  static const cv::Size kKittiFrameSize(kKittiFrameWidth, kKittiFrameHeight);
 }
 
 

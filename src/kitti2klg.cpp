@@ -7,7 +7,8 @@
 #include <vector>
 
 // TODO(andrei): If you decide to stick with gflags, mention them as a
-// dependency in the README.
+// dependency in the README. Or, better yet, add them as a git submodule, and
+// depend on them elegnatly from cmake.
 #include <gflags/gflags.h>
 #include <opencv2/opencv.hpp>
 #include <zlib.h>
@@ -21,6 +22,23 @@
 #include "image.h"
 #include "elas.h"
 #include "util.h"
+
+// TODO(andrei): Disparity maps from stereo can still be quite noisy. This
+// noise can lead to roughness in the 3D reconstruction, and overall reduced
+// model quality. Zhou et al., 2015 use depth maps obtained from
+// omnidirectional video to perform 3D reconstructions using a volumetric
+// approach. They mention the following:
+// "To overcome outliers in range maps obtained from stereo
+// vision, local regularization is typically employed. This leads to smoother
+// reconstructions by penalizing the perime- ter of level sets [43] or
+// encouraging local planarity [18]. For some scenarios, even stronger
+// assumptions can be lever- aged, such as piecewise planarity [13] or
+// a Manhattanworld [11]."
+//
+// It would therefore be interesting to explore additional depth map
+// regularization, as long as the cost would not be too large (not more than,
+// say. 50-100ms).
+
 
 namespace kitti2klg {
   using namespace std;
@@ -146,30 +164,40 @@ namespace kitti2klg {
 
       // TODO(andrei): Double-check the fact that the disparity is expressed in pixels.
       // meters * px / px * 100 => centimeters.
+      // TODO(andrei): Nonlinear scaling, enhancing resolution closer to the
+      // camera but potentially dropping distant depth information
+      // altogether, since it probably won't be too useful for libelas.
       float depth_cm_f = ((baseline_m * focal_length_px) / disparity_px) *
-          100.0f * 5.0f;
-      uint16_t depth_cm_u = static_cast<uint16_t>(depth_cm_f);
+          100.0f * 10.0f;
+      uint32_t depth_cm_u32 = static_cast<uint32_t>(depth_cm_f);
 
-      // Ensure we don't flag things really far away as invalid (==USHRT_MAX).
-      if (depth_cm_u > USHRT_MAX - 1) {
-//        if (depth_cm - 65535 > 500) {
-//          badover++;
-//        }
-        depth_cm_u = USHRT_MAX - 1;
+      if (depth_cm_u32 > USHRT_MAX - 1) {
+        // Invalidate things that are too far away.
+        depth_cm_u32 = USHRT_MAX;
       }
 
-      return depth_cm_u;
+      // HACK to see if pruning extreme values help (it doesn't seem to).
+//      if (depth_cm_u > 35000) {
+//        depth_cm_u = USHRT_MAX;
+//      }
+//      if (depth_cm_u < 500) {
+//        depth_cm_u = USHRT_MAX;
+//      }
+
+      return static_cast<uint16_t>(depth_cm_u32);
     }
   }
 
 
-  /// \brief Uses libelas to compute the depth map from a stereo pair.
-  /// Only computes the depth in the left camera's frame.
+  /// \brief Uses libelas to compute the disparity map from a stereo pair.
+  /// Only computes the map in the left camera's frame.
   /// \param depth_out The preallocated depth map object, to be populated by
   /// this function.
-  void ComputeDepth(
-      const image<uchar>& left,
-      const image<uchar>& right,
+  void ComputeDisparity(
+      const image<uchar> &left,
+      const image<uchar> &right,
+      const float baseline_m,
+      const float focal_length_px,
       image<uint16_t> *depth_out
   ) {
     // Heavily based on the demo program which ships with libelas.
@@ -187,10 +215,6 @@ namespace kitti2klg {
     param.postprocess_only_left = true;
     Elas elas(param);
     elas.process(left.data, right.data, D1_data, D2_data, dims);
-
-    // TODO(andrei): Pass these as parameters, you MONSTER.
-    float baseline_m = 0.571f;
-    float focal_length_px = 645.2f;
 
     // Convert the float disparity map to 16-bit unsigned int depth map,
     // expressed in centimeters.
@@ -280,7 +304,7 @@ namespace kitti2klg {
 //      }
 //
 //      int64_t frame_timestamp = timestamps[i];
-//      ComputeDepth(img_pair->first, img_pair->second, depth.get());
+//      ComputeDisparity(img_pair->first, img_pair->second, depth.get());
 //      // This is the value we give to zlib, which then updates it to reflect
 //      // the resulting size of the data, after compression.
 //      size_t compressed_depth_actual_size = compressed_depth_buffer_size;
@@ -383,6 +407,10 @@ namespace kitti2klg {
       return;
     }
 
+    // Calibration parameters of the KITTI dataset stereo rig.
+    float baseline_m = 0.571f;
+    float focal_length_px = 645.2f;
+
     vector<stereo_fpath_pair> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
 
     fs::path frames_folder = output_path / "Frames";
@@ -395,24 +423,19 @@ namespace kitti2klg {
     int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
     cout << "Found: " << num_frames << " frames to process." << endl;
 
-
     // The target size we should reshape our frames to be.
-    cv::Size target_size(640, 480);
+//    cv::Size target_size(640, 480);
+    cv::Size target_size(kKittiFrameWidth, kKittiFrameHeight);
 
     for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
       if (process_frames > -1 && i >= process_frames) {
         cout << "Stopping early after reaching fixed limit of "
-             << process_frames
-             << " frames." << endl;
+             << process_frames << " frames." << endl;
         break;
       }
 
       const auto &pair_fpaths = stereo_pair_fpaths[i];
-      // Note: this is the timestamp associated with the left grayscale frame.
-      // The right camera frames have slightly different timestamps. For the
-      // purpose of this experimental application, we should nevertheless be OK
-      // to just use the left camera's timestamps.
-      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
+      cout << "Processing " << pair_fpaths.first.filename() << "." << endl;
       auto img_pair = LoadStereoPair(pair_fpaths);
 
       // get image width and height
@@ -424,12 +447,32 @@ namespace kitti2klg {
             "KITTI frame dimensions of %d x %d.", kKittiFrameWidth, kKittiFrameHeight));
       }
 
+      // TODO(andrei): Read the KITTI RGB off the disk.
+      // Process the intensity image, converting it to RGB.
+      cv::Mat *left_frame_cv = ToCvMat(*(img_pair->first));
+      cv::Mat left_frame_cv_col(left_frame_cv->size(), CV_8U);
+      cv::cvtColor(*left_frame_cv, left_frame_cv_col, CV_GRAY2BGR);
+
       auto depth = make_shared<image<uint16_t>>(width, height);
-      ComputeDepth(*(img_pair->first), *(img_pair->second), depth.get());
+      ComputeDisparity(*(img_pair->first), *(img_pair->second), baseline_m,
+                       focal_length_px, depth.get());
+
       cv::Mat *depth_cv = ToCvMat(*depth);
 
+      // Resize the images if the target size is different from the input one.
+      // Note that resizing may produce artifacts, especially in the depth
+      // channel.
       cv::Mat depth_cv_resized(target_size, CV_16U);
-      cv::resize(*depth_cv, depth_cv_resized, target_size);
+      cv::Mat left_frame_resized(target_size, CV_8U);
+      if (target_size != kKittiFrameSize) {
+        cv::resize(*depth_cv, depth_cv_resized, target_size);
+        cv::resize(left_frame_cv_col, left_frame_resized, target_size);
+      }
+      else {
+        // TODO(andrei): Can we do this in a nicer fashion?
+        depth_cv_resized = *depth_cv;
+        left_frame_resized = left_frame_cv_col;
+      }
 
       ostringstream grayscale_fname;
       grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
@@ -439,19 +482,11 @@ namespace kitti2klg {
       fs::path grayscale_fpath = output_path / "Frames" / grayscale_fname.str();
       fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
-      cv::Mat *left_frame_cv = ToCvMat(*(img_pair->first));
-      cv::Mat left_frame_cv_col(left_frame_cv->size(), CV_8U);
-      cv::cvtColor(*left_frame_cv, left_frame_cv_col, CV_GRAY2BGR);
-
-      cv::Mat left_frame_vga;
-      cv::resize(left_frame_cv_col, left_frame_vga, target_size);
-
-      cv::imwrite(color_fpath, left_frame_vga);
+      cv::imwrite(color_fpath, left_frame_resized);
       cv::imwrite(grayscale_fpath, depth_cv_resized);
 
       delete left_frame_cv;
       delete depth_cv;
-      cout << " OK." << endl;
     }
   }
 }
@@ -490,6 +525,8 @@ int main(int argc, char **argv) {
   if (kitti2klg::FLAGS_infinitam) {
     // Process the stereo data into an InfiniTAM-style folder consisting of
     // `pgm` RGB images and `pbm` grayscale depth images.
+    // affine 0.0008 0.0 should be a good starting point in the InfiniTAM
+    // calibration file (last line---stereo rig parameters).
     std::cout << "InfiniTAM-friendly pgm+pbm dir here: [" << output_path << "]" << std::endl;
 
     // TODO(andrei): Rename this package accordingly.
