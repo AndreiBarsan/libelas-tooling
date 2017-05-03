@@ -27,17 +27,21 @@
 // noise can lead to roughness in the 3D reconstruction, and overall reduced
 // model quality. Zhou et al., 2015 use depth maps obtained from
 // omnidirectional video to perform 3D reconstructions using a volumetric
-// approach. They mention the following:
+// approach. Even though they don't actually use this method (since they
+// perform regularization in a different framework), they mention the following:
 // "To overcome outliers in range maps obtained from stereo
 // vision, local regularization is typically employed. This leads to smoother
 // reconstructions by penalizing the perime- ter of level sets [43] or
 // encouraging local planarity [18]. For some scenarios, even stronger
-// assumptions can be lever- aged, such as piecewise planarity [13] or
-// a Manhattanworld [11]."
+// assumptions can be leveraged, such as piecewise planarity [13] or
+// a Manhattan world [11]."
 //
 // It would therefore be interesting to explore additional depth map
-// regularization, as long as the cost would not be too large (not more than,
-// say. 50-100ms).
+// regularization in our pipeline, as long as the cost would not be too large
+// (not more than, say. 50-100ms). Alternatively, we could also use their own
+// similarity-based regularization system for something like the car model
+// fusion.
+// TODO(andrei): How fast is Zhou et al.'s method?)
 
 
 namespace kitti2klg {
