@@ -112,6 +112,11 @@ cv::Mat* kitti2klg::ToCvMat(const image<uint16_t> &libelas_image) {
   return new cv::Mat(size, CV_16U, libelas_image.data);
 }
 
+cv::Mat* kitti2klg::ToCvMat(const image<int16_t> &libelas_image) {
+  CvSize size = cvSize(libelas_image.width(), libelas_image.height());
+  return new cv::Mat(size, CV_16S, libelas_image.data);
+}
+
 CvMat* kitti2klg::EncodeJpeg(const image <uchar> &raw_image) {
   cv::Mat *raw_mat = ToCvMat(raw_image);
   CvMat *jpeg = EncodeJpeg(*raw_mat);

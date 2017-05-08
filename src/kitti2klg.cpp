@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+// WARNING: There is likey something rotten with this code. I have NO idea
+// what it is, as of May 7th 2017, BUT the depth maps it produces seem to
+// give InfiniTAM indigestion, and I have no idea why.
+
 // TODO(andrei): If you decide to stick with gflags, mention them as a
 // dependency in the README. Or, better yet, add them as a git submodule, and
 // depend on them elegnatly from cmake.
@@ -41,7 +45,7 @@
 // (not more than, say. 50-100ms). Alternatively, we could also use their own
 // similarity-based regularization system for something like the car model
 // fusion.
-// TODO(andrei): How fast is Zhou et al.'s method?)
+// TODO(andrei): How fast is Zhou et al.'s method?
 
 
 namespace kitti2klg {
@@ -73,8 +77,23 @@ namespace kitti2klg {
       const fs::path &sequence_root,
       const string image_extension = ".png"
   ) {
-    fs::path left_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
-    fs::path right_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
+    fs::path left_dir, right_dir;
+    if (fs::exists(sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER)) {
+      // Looks like a regular KITTI sequence.
+      left_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
+      right_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
+    }
+    else if (fs::exists(sequence_root / "image_0")){
+      // Looks like a KITTI odometry benchmark sequence.
+      left_dir = sequence_root / "image_0";
+      right_dir = sequence_root / "image_1";
+    }
+    else {
+      // Note: In the future, we could support more stereo sequences, like those
+      // from the Cityscapes, Karlsruhe, etc. datasets.
+      throw runtime_error(Format("Unknown type of sequence in folder [%s].",
+                                 sequence_root.string()));
+    }
 
     // Iterate through the left-image and the right-image directories
     // simultaneously, grabbing the file names along the way.
@@ -158,7 +177,9 @@ namespace kitti2klg {
     if (disparity_px == kInvalidDepth) {
       // If libelas flags this as an invalid depth measurement, we want to
       // propagate that to the underlying SLAM system.
-      return USHRT_MAX;
+      // TODO(andrei): Double check that this is the way InfiniTAM flags
+      // invalid depth values!!!
+      return 0;
     }
     else {
       // Compute depth from disparity. Note that the scale is likely WAY
@@ -166,19 +187,21 @@ namespace kitti2klg {
       // millimiters, but God knows what InfiniTAM expects.
       // Z = (b * f) / disparity.
 
-      // TODO(andrei): Double-check the fact that the disparity is expressed in pixels.
-      // meters * px / px * 100 => centimeters.
       // TODO(andrei): Nonlinear scaling, enhancing resolution closer to the
       // camera but potentially dropping distant depth information
       // altogether, since it probably won't be too useful for libelas.
-      float depth_cm_f = ((baseline_m * focal_length_px) / disparity_px) *
-          100.0f * 10.0f;
-      uint32_t depth_cm_u32 = static_cast<uint32_t>(depth_cm_f);
+      const float MetersToCentimeters = 100.0f;
+      float depth_m_f = (baseline_m * focal_length_px) / disparity_px;
+      float depth_cm_f = depth_m_f * MetersToCentimeters;
 
-      if (depth_cm_u32 > USHRT_MAX - 1) {
-        // Invalidate things that are too far away.
-        depth_cm_u32 = USHRT_MAX;
+      int32_t depth_cm_u32 = static_cast<int32_t>(depth_cm_f);
+
+      if (depth_cm_u32 > 30000) {
+        depth_cm_u32 = 0;
       }
+
+//      cout << USHRT_MAX << endl;
+//      cout << numeric_limits<uint16_t>::max() << endl;
 
       // HACK to see if pruning extreme values help (it doesn't seem to).
 //      if (depth_cm_u > 35000) {
@@ -191,7 +214,6 @@ namespace kitti2klg {
       return static_cast<uint16_t>(depth_cm_u32);
     }
   }
-
 
   /// \brief Uses libelas to compute the disparity map from a stereo pair.
   /// Only computes the map in the left camera's frame.
@@ -400,6 +422,7 @@ namespace kitti2klg {
 
   // TODO(andrei): Refactor such that there is less code duplication between
   // this method and `BuildKintinousLog`.
+  // \brief Generates an InfiniTAM-readable color+depth image folder.
   void BuildInfinitamLog(
       const fs::path &kitti_sequence_root,
       const fs::path &output_path,
@@ -428,8 +451,11 @@ namespace kitti2klg {
     cout << "Found: " << num_frames << " frames to process." << endl;
 
     // The target size we should reshape our frames to be.
-//    cv::Size target_size(640, 480);
     cv::Size target_size(kKittiFrameWidth, kKittiFrameHeight);
+    // TODO(andrei): Pass this as a parameter.
+//    float ratio = 0.66f;
+//    target_size.width *= ratio;
+//    target_size.height *= ratio;
 
     for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
       if (process_frames > -1 && i >= process_frames) {
@@ -445,11 +471,14 @@ namespace kitti2klg {
       // get image width and height
       int32_t width  = img_pair->first->width();
       int32_t height = img_pair->second->height();
-      if(width != kKittiFrameWidth || height != kKittiFrameHeight) {
-        throw runtime_error(Format(
-            "Unexpected image dimensions encountered! Was assuming standard "
-            "KITTI frame dimensions of %d x %d.", kKittiFrameWidth, kKittiFrameHeight));
-      }
+
+      // TODO(andrei): Just make sure sizes are consistent throughout the
+      // sequence, otherwise this check is just a PITA.
+//      if(width != kKittiFrameWidth || height != kKittiFrameHeight) {
+//        throw runtime_error(Format(
+//            "Unexpected image dimensions encountered! Was assuming standard "
+//            "KITTI frame dimensions of %d x %d.", kKittiFrameWidth, kKittiFrameHeight));
+//      }
 
       // TODO(andrei): Read the KITTI RGB off the disk.
       // Process the intensity image, converting it to RGB.
@@ -487,7 +516,11 @@ namespace kitti2klg {
       fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
       cv::imwrite(color_fpath, left_frame_resized);
+
       cv::imwrite(grayscale_fpath, depth_cv_resized);
+//      cv::FileStorage fileStorage(grayscale_fpath.string(), cv::FileStorage::WRITE);
+//      fileStorage.writeObj(NULL, (void *) &depth_cv_resized);
+
 
       delete left_frame_cv;
       delete depth_cv;

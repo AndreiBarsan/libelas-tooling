@@ -6,6 +6,7 @@
 #include <cstdarg>
 #include <cstring>
 
+
 namespace kitti2klg {
   namespace fs = std::experimental::filesystem;
 
@@ -63,6 +64,8 @@ namespace kitti2klg {
   cv::Mat *ToCvMat(const image<uchar> &libelas_image);
 
   cv::Mat *ToCvMat(const image<uint16_t> &libelas_image);
+
+  cv::Mat *ToCvMat(const image<int16_t> &libelas_image);
 
   /// \brief Encodes a raw image as JPEG, for use in the 'klg' log.
   /// \return A 1D CvMat pointer to the compressed byte representation. The
