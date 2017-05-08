@@ -64,6 +64,51 @@ namespace kitti2klg {
       "Kintinuous logger format, folder when using InfiniTAM format).");
   DEFINE_int32(process_frames, -1, "Number of frames to process. Set to -1 "
       "to process the entire sequence.");
+  DEFINE_bool(use_color, true, "Whether add color information to the "
+      "resulting dump. If disabled, grayscale info is used instead.");
+
+  /// \brief Stores information about a frame of visual data.
+  struct StereoFrameFpaths {
+    fs::path left_gray_fpath;
+    fs::path right_gray_fpath;
+    fs::path left_color_fpath;
+    fs::path right_color_fpath;
+
+    StereoFrameFpaths(const fs::path &left_gray_fpath,
+                      const fs::path &right_gray_fpath,
+                      const fs::path &left_color_fpath,
+                      const fs::path &right_color_fpath) : left_gray_fpath(
+        left_gray_fpath), right_gray_fpath(right_gray_fpath), left_color_fpath(
+        left_color_fpath), right_color_fpath(right_color_fpath) {}
+
+    // TODO-LOW(andrei): More data, if necessary, such as Velodyne points,
+    // IMU info, etc.
+  };
+
+  /// \brief Computes the full paths of the files in `dir`, having `extension`.
+  vector<fs::path> ListDir(const fs::path &dir, const string &extension) {
+    auto dir_it = fs::directory_iterator(dir);
+    vector<fs::path> fileList;
+    for(auto it = fs::begin(dir_it); it != fs::end(dir_it); ++it) {
+      if (kitti2klg::EndsWith(it->path().string(), extension)) {
+        fileList.push_back(it->path());
+      }
+    }
+    return fileList;
+  }
+
+  /// \brief Turns to vectors into a single vector of pairs.
+  /// \note The resulting vector is as long as the shortest of the inputs.
+  template<typename T, typename U>
+  vector<std::pair<T, U>> Zip(std::vector<T> left, std::vector<U> right) {
+    vector<std::pair<T, U>> result;
+    for(auto it_l = left.cbegin(), it_r = right.cbegin();
+        it_l != left.cend(), it_r != right.cend();
+        ++it_l, ++it_r) {
+      result.emplace_back(*it_l, *it_r);
+    }
+    return result;
+  };
 
   /**
    * @brief Get a list of filenames for KITTI stereo pairs.
@@ -73,20 +118,35 @@ namespace kitti2klg {
    * @return A list of filename pairs containing the corresponding left and
    *    right grayscale image files for every frame.
    */
-  vector<stereo_fpath_pair> GetKittiStereoPairPaths(
+  vector<StereoFrameFpaths> GetKittiStereoPairPaths(
       const fs::path &sequence_root,
       const string image_extension = ".png"
   ) {
-    fs::path left_dir, right_dir;
+    // Libelas only cares about intensity, so we use the grayscale images for
+    // the depth, but feed the colored left frame to the downstream SLAM
+    // system to get colored maps.
+    // So why can't we just load the color images and convert them to
+    // grayscale before giving them to libelas?
+    // Great question, Billy! It's because the gray and color images from the
+    // KITTI dataset have been taken using different cameras. And the
+    // grayscale cameras actually have a better dynamic range than the color
+    // ones. Otherwise, there wouldn't even be any point to using both
+    // grayscale and color cameras!
+    fs::path left_gray_dir, right_gray_dir;
+    fs::path left_color_dir, right_color_dir;
     if (fs::exists(sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER)) {
       // Looks like a regular KITTI sequence.
-      left_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
-      right_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
+      left_gray_dir = sequence_root / KITTI_GRAYSCALE_LEFT_FOLDER / "data";
+      right_gray_dir = sequence_root / KITTI_GRAYSCALE_RIGHT_FOLDER / "data";
+      left_color_dir = sequence_root / KITTI_COLOR_LEFT_FOLDER / "data";
+      right_color_dir = sequence_root / KITTI_COLOR_RIGHT_FOLDER / "data";
     }
     else if (fs::exists(sequence_root / "image_0")){
       // Looks like a KITTI odometry benchmark sequence.
-      left_dir = sequence_root / "image_0";
-      right_dir = sequence_root / "image_1";
+      left_gray_dir = sequence_root / "image_0";
+      right_gray_dir = sequence_root / "image_1";
+      left_color_dir = sequence_root / "image_2";
+      right_color_dir = sequence_root / "image_3";
     }
     else {
       // Note: In the future, we could support more stereo sequences, like those
@@ -95,30 +155,37 @@ namespace kitti2klg {
                                  sequence_root.string()));
     }
 
-    // Iterate through the left-image and the right-image directories
-    // simultaneously, grabbing the file names along the way.
-    vector<pair<fs::path, fs::path>> result;
-    auto left_dir_it = fs::directory_iterator(left_dir);
-    auto right_dir_it = fs::directory_iterator(right_dir);
-    auto left_it = fs::begin(left_dir_it), right_it = fs::begin(right_dir_it);
-    for(; left_it != fs::end(left_dir_it) && right_it != fs::end(right_dir_it);
-        ++left_it, ++right_it) {
-      if (kitti2klg::EndsWith(left_it->path().string(), image_extension) &&
-          kitti2klg::EndsWith(right_it->path().string(), image_extension)) {
-        result.emplace_back(left_it->path(), right_it->path());
-      }
+    vector<fs::path> left_gray_fpaths = ListDir(left_gray_dir, image_extension);
+    vector<fs::path> right_gray_fpaths = ListDir(right_gray_dir, image_extension);
+    // TODO(andrei): Don't try to load color if the folders aren't there (for
+    // the odometry dataset, color data can be downloaded separately).
+    vector<fs::path> left_color_fpaths = ListDir(left_color_dir, image_extension);
+    vector<fs::path> right_color_fpaths = ListDir(right_color_dir, image_extension);
+
+    if (left_gray_fpaths.size() != right_gray_fpaths.size() ||
+        left_gray_fpaths.size() != left_color_fpaths.size() ||
+        left_gray_fpaths.size() != right_color_fpaths.size()
+    ) {
+      throw runtime_error("Different frame counts in the stereo folders.");
     }
 
-    if (left_it != fs::end(left_dir_it) || right_it != fs::end(right_dir_it)) {
-      throw runtime_error("Different frame counts in the two stereo folders.");
+    vector<StereoFrameFpaths> result;
+    for(size_t i = 0; i < left_gray_fpaths.size(); ++i) {
+      result.push_back(StereoFrameFpaths(
+          left_gray_fpaths[i],
+          right_gray_fpaths[i],
+          left_color_fpaths[i],
+          right_color_fpaths[i]
+      ));
     }
 
     // Explicitly sort the paths so that they're in ascending order, since the
     // directory iterator does not guarantee it, and it's useful to iterate
     // through the frames in order when working on subsets of the data.
-    auto compare_path_pairs = [](pair<fs::path, fs::path> stereo_pair_A,
-                                 pair<fs::path, fs::path> stereo_pair_B) {
-      return stereo_pair_A.first.filename().string() < stereo_pair_B.first.filename().string();
+    auto compare_path_pairs = [](const StereoFrameFpaths &stereo_pair_A,
+                                 const StereoFrameFpaths &stereo_pair_B) {
+      return stereo_pair_A.left_gray_fpath.filename().string() <
+             stereo_pair_B.left_gray_fpath.filename().string();
     };
     sort(result.begin(), result.end(), compare_path_pairs);
 
@@ -149,9 +216,11 @@ namespace kitti2klg {
     }
   }
 
-  unique_ptr<stereo_image_pair> LoadStereoPair(const stereo_fpath_pair& pair_fpaths) {
+  /// \brief Loads the gray images from a stereo frame.
+  /// \note We don't need the color information for the depth when using libelas.
+  unique_ptr<stereo_image_pair> LoadStereoPair(const StereoFrameFpaths& pair_fpaths) {
     auto result = make_unique<stereo_image_pair>(
-      LoadImage(pair_fpaths.first), LoadImage(pair_fpaths.second)
+      LoadImage(pair_fpaths.left_gray_fpath), LoadImage(pair_fpaths.right_gray_fpath)
     );
     auto left = result->first;
     auto right = result->second;
@@ -179,12 +248,9 @@ namespace kitti2klg {
       // propagate that to the underlying SLAM system.
       // TODO(andrei): Double check that this is the way InfiniTAM flags
       // invalid depth values!!!
-      return 0;
+      return numeric_limits<uint16_t>::max();
     }
     else {
-      // Compute depth from disparity. Note that the scale is likely WAY
-      // off, since the kinect sensor canonically spits things out in
-      // millimiters, but God knows what InfiniTAM expects.
       // Z = (b * f) / disparity.
 
       // TODO(andrei): Nonlinear scaling, enhancing resolution closer to the
@@ -194,24 +260,22 @@ namespace kitti2klg {
       float depth_m_f = (baseline_m * focal_length_px) / disparity_px;
       float depth_cm_f = depth_m_f * MetersToCentimeters;
 
-      int32_t depth_cm_u32 = static_cast<int32_t>(depth_cm_f);
+      // Mini-hack: force more resolution at closer range! Make sure you
+      // account for this in the dataset calibration file, by setting the
+      // last line to be something like "affine 0.0001 0.0". The default
+      // first parameter is 0.001, and since we're "magnifying" by depth_cm_f
+      // here, we should divide the first affine param by the same amount.
+      float depth_mm_f = depth_cm_f * 10.0f;
 
-      if (depth_cm_u32 > 30000) {
-        depth_cm_u32 = 0;
+      int32_t depth_mm_u32 = static_cast<int32_t>(depth_mm_f);
+
+      // TODO(andrei): Define this threshold in meters, maybe?
+      if (depth_mm_u32 > 20000) {
+        depth_mm_u32 = numeric_limits<uint16_t>::max();
+//        depth_cm_u32 = 0;
       }
 
-//      cout << USHRT_MAX << endl;
-//      cout << numeric_limits<uint16_t>::max() << endl;
-
-      // HACK to see if pruning extreme values help (it doesn't seem to).
-//      if (depth_cm_u > 35000) {
-//        depth_cm_u = USHRT_MAX;
-//      }
-//      if (depth_cm_u < 500) {
-//        depth_cm_u = USHRT_MAX;
-//      }
-
-      return static_cast<uint16_t>(depth_cm_u32);
+      return static_cast<uint16_t>(depth_mm_u32);
     }
   }
 
@@ -237,9 +301,15 @@ namespace kitti2klg {
     float *D2_data = (float *) malloc(width * height * sizeof(float));
 
     // process
-    Elas::parameters param;
-    param.postprocess_only_left = true;
-    Elas elas(param);
+    Elas::parameters params(Elas::ROBOTICS);   // Use the default config.
+    params.add_corners = 1;
+    params.match_texture = 1;
+    // The bigger this is, the bigger the gaps we interpolate over.
+    // The default is 3.
+    params.ipol_gap_width = 7;
+
+    params.postprocess_only_left = true;
+    Elas elas(params);
     elas.process(left.data, right.data, D1_data, D2_data, dims);
 
     // Convert the float disparity map to 16-bit unsigned int depth map,
@@ -266,7 +336,7 @@ namespace kitti2klg {
   /// the KITTI dataset.
   /// \param output_path '*.klg' file to write the log to. Overwrites
   /// existing files.
-  /// \param process_frames Number of frames to process. -1 means all.
+  /// \param frame_count Number of frames to process. -1 means all.
   ///
   /// The expected format first contains the number of frames, and then, for
   /// each frame in the sequence:
@@ -422,11 +492,20 @@ namespace kitti2klg {
 
   // TODO(andrei): Refactor such that there is less code duplication between
   // this method and `BuildKintinousLog`.
-  // \brief Generates an InfiniTAM-readable color+depth image folder.
+  /// \brief Generates an InfiniTAM-readable color+depth image folder.
+  ///
+  /// \param kitti_sequence_root Location of the KITTI or KITTI-odometry
+  /// video sequence.
+  /// \param frame_count The number of frames to process. Set to '-1' to
+  /// process all the frames in a folder.
+  /// \param use_color Whether to use the left color image as the image part
+  /// of the output. If set to 'false', the grayscale left image used to
+  /// compute the depth is used.
   void BuildInfinitamLog(
       const fs::path &kitti_sequence_root,
       const fs::path &output_path,
-      const int process_frames
+      const int frame_count,
+      const bool use_color
   ) {
     if (! fs::exists(kitti_sequence_root)) {
       cerr << "Could not find KITTI dataset root directory at: "
@@ -435,10 +514,14 @@ namespace kitti2klg {
     }
 
     // Calibration parameters of the KITTI dataset stereo rig.
-    float baseline_m = 0.571f;
-    float focal_length_px = 645.2f;
+//    float baseline_m = 0.571f;
+//    float focal_length_px = 645.2f;
 
-    vector<stereo_fpath_pair> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
+    // Parameters used in the KITTI-odometry dataset.
+    float baseline_m = 0.537150654273f;
+    float focal_length_px = 707.0912f;
+
+    vector<StereoFrameFpaths> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
 
     fs::path frames_folder = output_path / "Frames";
     if (! fs::exists(frames_folder)) {
@@ -452,20 +535,16 @@ namespace kitti2klg {
 
     // The target size we should reshape our frames to be.
     cv::Size target_size(kKittiFrameWidth, kKittiFrameHeight);
-    // TODO(andrei): Pass this as a parameter.
-//    float ratio = 0.66f;
-//    target_size.width *= ratio;
-//    target_size.height *= ratio;
 
     for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
-      if (process_frames > -1 && i >= process_frames) {
+      if (frame_count > -1 && i >= frame_count) {
         cout << "Stopping early after reaching fixed limit of "
-             << process_frames << " frames." << endl;
+             << frame_count << " frames." << endl;
         break;
       }
 
       const auto &pair_fpaths = stereo_pair_fpaths[i];
-      cout << "Processing " << pair_fpaths.first.filename() << "." << endl;
+      cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << "." << endl;
       auto img_pair = LoadStereoPair(pair_fpaths);
 
       // get image width and height
@@ -480,11 +559,17 @@ namespace kitti2klg {
 //            "KITTI frame dimensions of %d x %d.", kKittiFrameWidth, kKittiFrameHeight));
 //      }
 
-      // TODO(andrei): Read the KITTI RGB off the disk.
-      // Process the intensity image, converting it to RGB.
-      cv::Mat *left_frame_cv = ToCvMat(*(img_pair->first));
-      cv::Mat left_frame_cv_col(left_frame_cv->size(), CV_8U);
-      cv::cvtColor(*left_frame_cv, left_frame_cv_col, CV_GRAY2BGR);
+      cv::Mat left_frame_cv_col; //(left_frame_cv.size(), CV_8U);
+      if (use_color) {
+        left_frame_cv_col = cv::imread(pair_fpaths.left_color_fpath.string());
+      }
+      else {
+        // Process the intensity image, converting it to RGB.
+        cv::Mat *temp = ToCvMat(*(img_pair->first));
+        cv::Mat left_frame_cv = cv::Mat(*temp);
+        delete temp;
+        cv::cvtColor(left_frame_cv, left_frame_cv_col, CV_GRAY2BGR);
+      }
 
       auto depth = make_shared<image<uint16_t>>(width, height);
       ComputeDisparity(*(img_pair->first), *(img_pair->second), baseline_m,
@@ -507,22 +592,18 @@ namespace kitti2klg {
         left_frame_resized = left_frame_cv_col;
       }
 
-      ostringstream grayscale_fname;
-      grayscale_fname << setfill('0') << setw(4) << i << ".pgm";
+      ostringstream depth_fname;
+      depth_fname << setfill('0') << setw(4) << i << ".pgm";
       stringstream color_fname;
       color_fname << setfill('0') << setw(4) << i << ".ppm";
 
-      fs::path grayscale_fpath = output_path / "Frames" / grayscale_fname.str();
+      fs::path grayscale_fpath = output_path / "Frames" / depth_fname.str();
       fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
       cv::imwrite(color_fpath, left_frame_resized);
-
       cv::imwrite(grayscale_fpath, depth_cv_resized);
-//      cv::FileStorage fileStorage(grayscale_fpath.string(), cv::FileStorage::WRITE);
-//      fileStorage.writeObj(NULL, (void *) &depth_cv_resized);
 
-
-      delete left_frame_cv;
+//      delete left_frame_cv;
       delete depth_cv;
     }
   }
@@ -566,8 +647,12 @@ int main(int argc, char **argv) {
     // calibration file (last line---stereo rig parameters).
     std::cout << "InfiniTAM-friendly pgm+pbm dir here: [" << output_path << "]" << std::endl;
 
-    // TODO(andrei): Rename this package accordingly.
-    kitti2klg::BuildInfinitamLog(kitti_seq_path, output_path, kitti2klg::FLAGS_process_frames);
+    // TODO(andrei): Rename this whole program accordingly. We're no longer
+    // focused on Kintinuous.
+    kitti2klg::BuildInfinitamLog(kitti_seq_path,
+                                 output_path,
+                                 kitti2klg::FLAGS_process_frames,
+                                 kitti2klg::FLAGS_use_color);
   }
   else {
     // Process the stereo data into a Kintinuous-style binary logfile
