@@ -287,7 +287,7 @@ namespace kitti2klg {
   /// Only computes the map in the left camera's frame.
   /// \param depth_out The preallocated depth map object, to be populated by
   /// this function.
-  void ComputeDisparity(
+  void ComputeDisparityElas(
       const image<uchar> &left,
       const image<uchar> &right,
       const float baseline_m,
@@ -306,6 +306,7 @@ namespace kitti2klg {
 
     // process
     Elas::parameters params(Elas::ROBOTICS);   // Use the default config.
+    params.disp_min = 16;     // Default is 0.
     params.add_corners = 1;
     params.match_texture = 1;
     // The bigger this is, the bigger the gaps we interpolate over.
@@ -327,6 +328,21 @@ namespace kitti2klg {
     free(D2_data);
   }
 
+  /// \brief Computes the disparity map from a stereo pair.
+  /// Only computes the map in the left camera's frame.
+  /// \param depth_out The pre-allocated depth map object, to be populated by
+  /// this function.
+  void ComputeDisparity(
+      const image<uchar> &left,
+      const image<uchar> &right,
+      const float baseline_m,
+      const float focal_length_px,
+      image<uint16_t> *depth_out
+  ) {
+    // Note: can add support for other libraries here, such as OpenCV's
+    // built-in SGM, or something else.
+    return ComputeDisparityElas(left, right, baseline_m, focal_length_px, depth_out);
+  }
 
   /// \brief Produces a Kintinuous-specific '.klg' file from a KITTI sequence.
   ///
