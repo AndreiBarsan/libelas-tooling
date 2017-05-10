@@ -243,12 +243,11 @@ namespace kitti2klg {
   /// \brief Computes a metric depth value from the supplied disparity and
   /// calibration parameters.
   uint16_t DepthFromDisparity(float disparity_px, float baseline_m, float focal_length_px) {
+    const uint16_t kInvalidInfinitamDepth = numeric_limits<uint16_t>::max();
     if (disparity_px == kInvalidDepth) {
       // If libelas flags this as an invalid depth measurement, we want to
       // propagate that to the underlying SLAM system.
-      // TODO(andrei): Double check that this is the way InfiniTAM flags
-      // invalid depth values!!!
-      return numeric_limits<uint16_t>::max();
+      return kInvalidInfinitamDepth;
     }
     else {
       // Z = (b * f) / disparity.
@@ -257,6 +256,7 @@ namespace kitti2klg {
       // camera but potentially dropping distant depth information
       // altogether, since it probably won't be too useful for libelas.
       const float MetersToCentimeters = 100.0f;
+      const float MetersToMillimeters = MetersToCentimeters * 10.0f;
       float depth_m_f = (baseline_m * focal_length_px) / disparity_px;
       float depth_cm_f = depth_m_f * MetersToCentimeters;
 
@@ -269,10 +269,14 @@ namespace kitti2klg {
 
       int32_t depth_mm_u32 = static_cast<int32_t>(depth_mm_f);
 
-      // TODO(andrei): Define this threshold in meters, maybe?
-      if (depth_mm_u32 > 20000) {
-        depth_mm_u32 = numeric_limits<uint16_t>::max();
-//        depth_cm_u32 = 0;
+      // TODO(andrei): Pass this as parameter, and explore it impact on the
+      // reconstruction.
+      float upper_threshold_mm = 17.5f * MetersToMillimeters;
+      // Invalidate depth measurements much too close to the camera, as
+      // they tend to be noisy.
+      float lower_threshold_mm =  5.0f * MetersToMillimeters;
+      if (depth_mm_u32 < lower_threshold_mm || depth_mm_u32 > upper_threshold_mm) {
+        return kInvalidInfinitamDepth;
       }
 
       return static_cast<uint16_t>(depth_mm_u32);
