@@ -271,10 +271,10 @@ namespace kitti2klg {
 
       // TODO(andrei): Pass this as parameter, and explore it impact on the
       // reconstruction.
-      float upper_threshold_mm = 17.5f * MetersToMillimeters;
+      float upper_threshold_mm = 16.0f * MetersToMillimeters;
       // Invalidate depth measurements much too close to the camera, as
       // they tend to be noisy.
-      float lower_threshold_mm =  5.0f * MetersToMillimeters;
+      float lower_threshold_mm =  6.0f * MetersToMillimeters;
       if (depth_mm_u32 < lower_threshold_mm || depth_mm_u32 > upper_threshold_mm) {
         return kInvalidInfinitamDepth;
       }
@@ -306,12 +306,14 @@ namespace kitti2klg {
 
     // process
     Elas::parameters params(Elas::ROBOTICS);   // Use the default config.
-    params.disp_min = 16;     // Default is 0.
-    params.add_corners = 1;
+    params.add_corners = 0;
     params.match_texture = 1;
     // The bigger this is, the bigger the gaps we interpolate over.
-    // The default is 3.
-    params.ipol_gap_width = 7;
+    // The default is 3. 7 leads to decent results. 11 is OK and seems
+    // slightly better, with a slightly lower cost in terms of memory.
+    // 31 doesn't change much, but the depth maps do look a bit oversmoothed.
+    // Around 100 the artifacts become quite large.
+    params.ipol_gap_width = 11;
 
     params.postprocess_only_left = true;
     Elas elas(params);
