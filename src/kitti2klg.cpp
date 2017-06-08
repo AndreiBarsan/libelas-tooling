@@ -584,15 +584,12 @@ void ProcessInfinitamFrame(int idx,
   stringstream color_fname;
   color_fname << setfill('0') << setw(4) << idx << ".ppm";
 
-  experimental::filesystem::v1::__cxx11::path
-      grayscale_fpath = output_path / "Frames" / depth_fname.str();
-  experimental::filesystem::v1::__cxx11::path
-      color_fpath = output_path / "Frames" / color_fname.str();
+  fs::path depth_fpath = output_path / "Frames" / depth_fname.str();
+  fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
   imwrite(color_fpath, left_frame_resized);
-  imwrite(grayscale_fpath, depth_cv_resized);
+  imwrite(depth_fpath, depth_cv_resized);
 
-//      delete left_frame_cv;
   delete depth_cv;
 }
 
