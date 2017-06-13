@@ -19,7 +19,7 @@ INCLUDE_DIRECTORIES(${ZLIB_INCLUDE_DIR})
 # use sse3 instruction set
 # Also enable c++14 support for clean filesystem interactions without requiring
 # boost or other dependencies.
-SET(CMAKE_CXX_FLAGS "-march=native -O3 -g3 -rdynamic -std=c++14 -lstdc++fs")
+SET(CMAKE_CXX_FLAGS "-march=native -O3  -rdynamic -std=c++14 -lstdc++fs")
 
 # sources
 FILE(GLOB LIBELAS_SRC_FILES "src/*.cpp")

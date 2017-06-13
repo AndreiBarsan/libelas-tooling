@@ -4,6 +4,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // WARNING: There is likey something rotten with this code. I have NO idea
@@ -531,7 +532,6 @@ void ProcessInfinitamFrame(int idx,
                            const vector<StereoFrameFpaths> &stereo_pair_fpaths,
                            const cv::Size &target_size) {
   const auto &pair_fpaths = stereo_pair_fpaths[idx];
-//  cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << ". ";
   auto img_pair = LoadStereoPair(pair_fpaths);
 
   int32_t width = img_pair->first->width();
@@ -549,7 +549,7 @@ void ProcessInfinitamFrame(int idx,
   if (use_color) {
     left_frame_cv_col = cv::imread(pair_fpaths.left_color_fpath.string());
   } else {
-// Process the intensity image, converting it to RGB.
+    // Process the intensity image, converting it to RGB.
     cv::Mat *temp = ToCvMat(*(img_pair->first));
     cv::Mat left_frame_cv = cv::Mat(*temp);
     delete temp;
@@ -561,7 +561,8 @@ void ProcessInfinitamFrame(int idx,
   ComputeDisparity(*(img_pair->first), *(img_pair->second), baseline_m,
                    focal_length_px, depth.get());
   int64_t disp_time = GetTimeMs() - disp_start;
-//  cout << "Took " << disp_time << "ms." << endl;
+  cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << ". "
+       << "Took " << disp_time << "ms." << endl;
 
   cv::Mat *depth_cv = ToCvMat(*depth);
 
@@ -654,6 +655,7 @@ void BuildInfinitamLog(
   ctpl::thread_pool p(8);
   for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
     if (frame_count > -1 && i >= frame_count) {
+    // Jobs may still be running in the background here.
       cout << "Stopping early after reaching fixed limit of "
            << frame_count << " frames." << endl;
       break;
@@ -670,6 +672,14 @@ void BuildInfinitamLog(
                             stereo_pair_fpaths,
                             target_size);
     });
+
+    // This prevents the queue from getting overloaded, which can use TONS of memory.
+    // It's not the best solution but it works.
+    while (p.size() == 0) {
+      using namespace std::chrono_literals;
+      cout << "Workers are busy, going to wait..." << endl;
+      this_thread::sleep_for(10ms);
+    }
   }
 }
 
