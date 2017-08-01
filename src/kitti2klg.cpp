@@ -391,8 +391,8 @@ void ProcessInfinitamFrame(int idx,
   fs::path depth_fpath = output_path / "Frames" / depth_fname.str();
   fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
-  imwrite(color_fpath, *depth_cv);
-  imwrite(depth_fpath, left_frame_cv_col);
+  imwrite(depth_fpath, *depth_cv);
+  imwrite(color_fpath, left_frame_cv_col);
 
   delete depth_cv;
 }
