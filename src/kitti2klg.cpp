@@ -438,14 +438,13 @@ void BuildInfinitamLog(
   ctpl::thread_pool p(6);
   for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
     if (frame_count > -1 && i >= frame_count) {
-    // Jobs may still be running in the background here.
-      cout << "Stopping early after reaching fixed limit of "
-           << frame_count << " frames." << endl;
+      cout << "Stopping early after reaching fixed limit of " << frame_count << " frames." << endl;
       break;
     }
 
     // Push the tasks to a pool and don't use any future, since the function automatically
     // does its job and writes the right file on disk.
+    auto stereo_pair = stereo_pair_fpaths[i];
     p.push([=](int) {
       ProcessInfinitamFrame(i,
                             output_path,
@@ -454,9 +453,12 @@ void BuildInfinitamLog(
                             focal_length_px,
                             min_depth_m,
                             max_depth_m,
-                            stereo_pair_fpaths[i]);
+                            stereo_pair);
     });
   }
+
+  // Wait for the queue to be consumed and all tasks to be completed.
+  p.stop(true);
 }
 
 double ReadFocalLength(fs::path kitti_odo_calib) {
