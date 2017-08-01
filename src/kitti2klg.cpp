@@ -336,171 +336,6 @@ void ComputeDepth(
   return ComputeDepthElas(left, right, baseline_m, focal_length_px, min_depth_m, max_depth_m, depth_out);
 }
 
-/// \brief Produces a Kintinuous-specific '.klg' file from a KITTI sequence.
-///
-/// Reads through all stereo pairs of a dataset in order, computes the
-/// depth (in the left camera frame), and then takes that depth map, plus
-/// the left camera's image, as well as some other miscellaneous
-/// information, and writes it to a logfile which can be read by SLAM
-/// systems designed for RGBD input, such as Kintinuous.
-///
-/// \param kitti_sequence_root Root folder of a particular sequence from
-/// the KITTI dataset.
-/// \param output_path '*.klg' file to write the log to. Overwrites
-/// existing files.
-/// \param frame_count Number of frames to process. -1 means all.
-///
-/// The expected format first contains the number of frames, and then, for
-/// each frame in the sequence:
-///  * int64_t: timestamp
-///  * int32_t: depthSize
-///  * int32_t: imageSize
-///  * depthSize * unsigned char: depth_compress_buf
-///  * imageSize * unsigned char: encodedImage->data.ptr
-///
-/// \note Requires images from KITTI sequence to be in PGM format.
-//  void BuildKintinuousLog(
-//      const fs::path &kitti_sequence_root,
-//      const fs::path &output_path,
-//      const int process_frames) {
-//    vector<pair<fs::path, fs::path>> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
-//    vector<long> timestamps = GetSequenceTimestamps(kitti_sequence_root);
-//
-//    // TODO(andrei): Flag to force resizing of all frames to arbitrary resolution.
-//    // TODO(andrei): Split this method up into multiple chunks.
-//    // TODO(andrei): If resizing is enabled, try computing the depth AFTER
-//    // the resize. It may be slightly less accurate, but it could be much faster.
-//
-//    // Open the file and write the number of frames in the sequence.
-//    FILE *log_file = fopen(output_path.string().c_str(), "wb+");
-//    int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
-//    if (process_frames > -1 && process_frames < num_frames) {
-//      num_frames = process_frames;
-//    }
-//    fwrite(&num_frames, sizeof(int32_t), 1, log_file);
-//
-//    // KITTI dataset standard stereo image size: 1242 x 375.
-//    int32_t standard_width = 1242;
-//    int32_t standard_height = 375;
-//
-//    // The target size we should reshape our frames to be.
-//    cv::Size target_size(640, 480);
-//    size_t compressed_depth_buffer_size = standard_width * standard_height * sizeof(int16_t) * 4;
-//    uint8_t *compressed_depth_buf = (uint8_t*) malloc(compressed_depth_buffer_size);
-//
-//    for(int i = 0; i < stereo_pair_fpaths.size(); ++i) {
-//      if(process_frames > -1 && i >= process_frames) {
-//        cout << "Stopping early after reaching fixed limit of " << process_frames
-//             << " frames." << endl;
-//        break;
-//      }
-//
-//      const auto &pair_fpaths = stereo_pair_fpaths[i];
-//      // Note: this is the timestamp associated with the left grayscale frame.
-//      // The right camera frames have slightly different timestamps. For the
-//      // purpose of this experimental application, we should nevertheless be OK
-//      // to just use the left camera's timestamps.
-//      cout << "Processing " << pair_fpaths.first << ", " << pair_fpaths.second;
-//      auto img_pair = LoadStereoPair(pair_fpaths);
-//      auto depth = make_shared<image<uchar>>(standard_width, standard_height);
-//
-//      // get image width and height
-//      int32_t width  = img_pair->first->width();
-//      int32_t height = img_pair->second->height();
-//      if(width != standard_width || height != standard_height) {
-//        throw runtime_error("Unexpected image dimensions encountered!");
-//      }
-//
-//      int64_t frame_timestamp = timestamps[i];
-//      ComputeDisparity(img_pair->first, img_pair->second, depth.get());
-//      // This is the value we give to zlib, which then updates it to reflect
-//      // the resulting size of the data, after compression.
-//      size_t compressed_depth_actual_size = compressed_depth_buffer_size;
-//
-//      cv::Mat depth_cv = cv::Mat(cvSize(depth->width(), depth->height()),
-//                                CV_8U,
-//                                depth->data);
-//
-////      // Invert the depth mask, since Kintinuous uses a different convention.
-////      cv::Mat zero_mask = (depth_cv == 0);
-////      cv::subtract(cv::Scalar::all(255.0), depth_cv, depth_cv);
-////      // We must ensure that invalid pixels are still set to zero.
-////      depth_cv.setTo(cv::Scalar::all(0.0), zero_mask);
-//
-//      // TODO(andrei): Consider moving these depth map operations to the depth
-//      // map generation function.
-//      // Try to mark measurements which are too far away as invalid, since
-//      // otherwise they can corrupt Kintinuous, it seems.
-//      // TODO(andrei): Investigate this further.
-//      cv::Mat far_mask = (depth_cv > 200);
-//      depth_cv.setTo(cv::Scalar::all(0.0), far_mask);
-//
-//      cv::Mat depth_cv_16_bit(depth_cv.size(), CV_16U);
-//      cv::Mat depth_cv_vga(target_size, CV_16U);
-//
-//      // This parameter ensures the full depth range of 0-255 is transferred
-//      // properly when we switch to 16-bit depth (required by Kintinuous).
-//      double alpha = 255.0;
-//
-//      // This is a parameter controlling the range of our depth. There should
-//      // be ways of setting this based on, e.g., our stereo rig configuration.
-//      double scale = 0.15;
-//
-//      // VERY IMPORTANT: You get very funky results in Kintinuous if you
-//      // accidentally give it an 8-bit depth map. It misinterprets it by sort
-//      // of splitting it up into what looks like footage meant for VR, i.e.,
-//      // into two depthmaps. Make sure you give Kintinuous 16-bit depth!
-//      // Ensure that our depth map is 16-bit, NOT 8-bit.
-//      depth_cv.convertTo(depth_cv_16_bit, CV_16U, alpha * scale);
-//      cv::resize(depth_cv_16_bit, depth_cv_vga, target_size);
-//      size_t raw_depth_size = depth_cv_vga.total() * depth_cv_vga.elemSize();
-//
-//      // Warning: 'compressed_depth_buf' will contain junk and residue from
-//      // previous frames beyond the indicated 'compressed_depth_actual_size'!
-//      // TODO(andrei): Try NO compression (NO JPEG and NO zlib). Kintinuous
-//      // does support that, and it may not be necessary.
-//      check_compress2(compress2(
-//          compressed_depth_buf,
-//          &compressed_depth_actual_size,
-//          (const Bytef*) depth_cv_vga.data,
-//          raw_depth_size,
-//          Z_BEST_SPEED));
-//
-////      float compression_ratio =
-////          static_cast<float>(compressed_depth_actual_size) / raw_depth_size;
-////      cout << "Depth compressed OK. Compressed result size: "
-////           << compressed_depth_actual_size << "/" << raw_depth_size
-////           << " (Compression: " << compression_ratio * 100.0 << "%)" << endl;
-//
-//      // Encode the left frame as a JPEG for the log.
-//      cv::Mat left_frame_cv = cv::Mat(cvSize(img_pair->first->width(),
-//                                             img_pair->first->height()),
-//                                      CV_8U,
-//                                      img_pair->first->data);
-//
-//      // TODO(andrei): Kintinuous is reading CV_8UC1. Should all our images use that format?
-//      cv::Mat left_frame_vga;
-//      cv::resize(left_frame_cv, left_frame_vga, target_size);
-//      CvMat *encoded_rgb_jpeg_vga = EncodeJpeg(left_frame_vga);
-//
-//      // The encoded JPEG is stored as a row-matrix.
-//      int32_t jpeg_size = static_cast<int32_t>(encoded_rgb_jpeg_vga->width);
-//
-//      // Write all the current frame information to the logfile.
-//      fwrite(&frame_timestamp, sizeof(int64_t), 1, log_file);
-//      fwrite(&compressed_depth_actual_size, sizeof(int32_t), 1, log_file);
-//      fwrite(&jpeg_size, sizeof(int32_t), 1, log_file);
-//      fwrite(compressed_depth_buf, compressed_depth_actual_size, 1, log_file);
-//      fwrite(encoded_rgb_jpeg_vga->data.ptr, static_cast<size_t>(jpeg_size), 1, log_file);
-//
-//      cout << " Write OK." << endl;
-//      cvReleaseMat(&encoded_rgb_jpeg_vga);
-//    }
-//
-//    free(compressed_depth_buf);
-//    fflush(log_file);
-//    fclose(log_file);
-//  }
 
 void ProcessInfinitamFrame(int idx,
                            const experimental::filesystem::path &output_path,
@@ -509,8 +344,8 @@ void ProcessInfinitamFrame(int idx,
                            double focal_length_px,
                            double min_depth_m,
                            double max_depth_m,
-                           const StereoFrameFpaths &pair_fpaths,
-                           const cv::Size &target_size) {
+                           const StereoFrameFpaths &pair_fpaths
+) {
   auto img_pair = LoadStereoPair(pair_fpaths);
 
   int32_t width = img_pair->first->width();
@@ -537,8 +372,9 @@ void ProcessInfinitamFrame(int idx,
 
   auto depth = make_shared<image<uint16_t>>(width, height);
   int64_t disp_start = GetTimeMs();
-  ComputeDepth(*(img_pair->first), *(img_pair->second), baseline_m, focal_length_px,
-               min_depth_m, max_depth_m, depth.get());
+  ComputeDepth(*(img_pair->first), *(img_pair->second),
+               baseline_m, focal_length_px, min_depth_m, max_depth_m,
+               depth.get());
   int64_t disp_time = GetTimeMs() - disp_start;
   if (idx % 17 == 0) {
     cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << ". "
@@ -599,22 +435,7 @@ void BuildInfinitamLog(
   int32_t num_frames = static_cast<int32_t>(stereo_pair_fpaths.size());
   cout << "Found: " << num_frames << " frames to process." << endl;
 
-  // The target size we should reshape our frames to be.
-  cv::Size target_size(kKittiFrameWidth, kKittiFrameHeight);
-
-  // 200 frames
-  //  - 2 threads: 14.591s
-  //  - 4 threads:  8.101s
-  //  - 6 threads:  6.864s
-  //  - 8 threads:  6.300s
-  //
-  // 1000 frames
-  //  - 2 threads: 70.940s
-  //  - 4 threads: 38.227s
-  //  - 6 threads: 31.910s
-  //  - 8 threads: 28.308s
-  //  - 8 threads no output: 31.53s 27.191s 27.024s
-  ctpl::thread_pool p(7);
+  ctpl::thread_pool p(6);
   for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
     if (frame_count > -1 && i >= frame_count) {
     // Jobs may still be running in the background here.
@@ -633,16 +454,8 @@ void BuildInfinitamLog(
                             focal_length_px,
                             min_depth_m,
                             max_depth_m,
-                            stereo_pair_fpaths[i],
-                            target_size);
+                            stereo_pair_fpaths[i]);
     });
-
-    // This prevents the queue from getting overloaded, which can use TONS of memory.
-    // It's not the best solution but it works.
-//    while (p.n_idle() == 0) {
-//      using namespace std::chrono_literals;
-//      this_thread::sleep_for(10ms);
-//    }
   }
 }
 
