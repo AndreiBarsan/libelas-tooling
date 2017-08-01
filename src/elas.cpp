@@ -810,7 +810,8 @@ void Elas::computeDisparity(vector<support_pt> p_support,vector<triangle> tri,in
   // loop variables
   int32_t c1, c2, c3;
   float plane_a,plane_b,plane_c,plane_d;
-  
+
+  // TODO-PERF(andrei): This could be done in parallel, right?
   // for all triangles do
   for (uint32_t i=0; i<tri.size(); i++) {
     

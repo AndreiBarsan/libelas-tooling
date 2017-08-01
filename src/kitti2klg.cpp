@@ -21,7 +21,6 @@
 #include <csignal>
 #include <limits>
 #include <iomanip>
-#include <wordexp.h>
 #include <sys/time.h>
 
 #include "config.h"
@@ -31,27 +30,6 @@
 
 // Support for thread pools in C++ (stl version == no Boost).
 #include "ctpl_stl.h"
-
-// TODO(andrei): Disparity maps from stereo can still be quite noisy. This
-// noise can lead to roughness in the 3D reconstruction, and overall reduced
-// model quality. Zhou et al., 2015 use depth maps obtained from
-// omnidirectional video to perform 3D reconstructions using a volumetric
-// approach. Even though they don't actually use this method (since they
-// perform regularization in a different framework), they mention the following:
-// "To overcome outliers in range maps obtained from stereo
-// vision, local regularization is typically employed. This leads to smoother
-// reconstructions by penalizing the perime- ter of level sets [43] or
-// encouraging local planarity [18]. For some scenarios, even stronger
-// assumptions can be leveraged, such as piecewise planarity [13] or
-// a Manhattan world [11]."
-//
-// It would therefore be interesting to explore additional depth map
-// regularization in our pipeline, as long as the cost would not be too large
-// (not more than, say. 50-100ms). Alternatively, we could also use their own
-// similarity-based regularization system for something like the car model
-// fusion.
-// TODO(andrei): How fast is Zhou et al.'s method?
-
 
 namespace kitti2klg {
 using namespace std;
@@ -71,6 +49,13 @@ DEFINE_int32(process_frames, -1, "Number of frames to process. Set to -1 "
     "to process the entire sequence.");
 DEFINE_bool(use_color, true, "Whether add color information to the "
     "resulting dump. If disabled, grayscale info is used instead.");
+
+DEFINE_string(calib_file, "", "Calibration file for the sequence, specified as a path "
+    "relative to 'kitti_root' parameter.");
+DEFINE_double(max_depth_meters, 30.0, "Depth values larger than this are discarded.");
+DEFINE_double(min_depth_meters, 0.5, "Depth values smaller than this are discarded.");
+// e.g., for KITTI this is 0.537150654273.
+DEFINE_double(baseline_meters, -1.0, "The baseline length of the stereo rig.");
 
 /// \brief Stores information about a frame of visual data.
 struct StereoFrameFpaths {
@@ -248,42 +233,31 @@ unique_ptr<stereo_image_pair> LoadStereoPair(const StereoFrameFpaths &pair_fpath
   return result;
 };
 
-/// \brief Computes a metric depth value from the supplied disparity and
-/// calibration parameters.
-uint16_t DepthFromDisparity(float disparity_px, float baseline_m, float focal_length_px) {
+/// \brief Computes a metric depth value from the supplied disparity and calibration parameters.
+uint16_t DepthFromDisparity(double disparity_px, double baseline_m, double focal_length_px,
+                            double min_depth_m, double max_depth_m
+) {
   const uint16_t kInvalidInfinitamDepth = numeric_limits<uint16_t>::max();
+  const float kMetersToCentimeters = 100.0f;
+  const float kMetersToMilimeters = kMetersToCentimeters * 10.0f;
+  // Discard depth measurements too close to, or too far from the camera, as they tend to be noisy.
+  double lower_threshold_mm = min_depth_m * kMetersToMilimeters;
+  double upper_threshold_mm = max_depth_m * kMetersToMilimeters;
+
+  if (upper_threshold_mm >= kInvalidInfinitamDepth) {
+    throw runtime_error("Upper depth threshold larger than the max value which can be stored in "
+                            "the depth map.");
+  }
+
   if (disparity_px == kInvalidDepth) {
-    // If libelas flags this as an invalid depth measurement, we want to
-    // propagate that to the underlying SLAM system.
+    // If libelas flags this as an invalid depth measurement, we want to propagate that to the
+    // underlying SLAM system.
     return kInvalidInfinitamDepth;
   } else {
-    // Z = (b * f) / disparity.
-
-    // TODO(andrei): Nonlinear scaling, enhancing resolution closer to the
-    // camera but potentially dropping distant depth information
-    // altogether, since it probably won't be too useful for libelas.
-    const float MetersToCentimeters = 100.0f;
-    const float MetersToMillimeters = MetersToCentimeters * 10.0f;
-    float depth_m_f = (baseline_m * focal_length_px) / disparity_px;
-    float depth_cm_f = depth_m_f * MetersToCentimeters;
-
-    // Mini-hack: force more resolution at closer range! Make sure you
-    // account for this in the dataset calibration file, by setting the
-    // last line to be something like "affine 0.0001 0.0". The default
-    // first parameter is 0.001, and since we're "magnifying" by depth_cm_f
-    // here, we should divide the first affine param by the same amount.
-    float depth_mm_f = depth_cm_f * 10.0f;
-
+    // Use the classic formula: Z = (b * f) / disparity.
+    double depth_m_f = (baseline_m * focal_length_px) / disparity_px;
+    double depth_mm_f = depth_m_f * kMetersToMilimeters;
     int32_t depth_mm_u32 = static_cast<int32_t>(depth_mm_f);
-
-    // TODO(andrei): Pass this as parameter, and explore it impact on the reconstruction.
-    // 16m seems a good upper threshold (based on qualitative results on sequence 6 from
-    // kitti odometry). 12m is even better (in the areas it does capture) but is quite limited
-    // in scale.
-    float upper_threshold_mm = 15.0f * MetersToMillimeters;
-    // Invalidate depth measurements much too close to the camera, as
-    // they tend to be noisy.
-    float lower_threshold_mm = 0.5f * MetersToMillimeters;
     if (depth_mm_u32 < lower_threshold_mm || depth_mm_u32 > upper_threshold_mm) {
       return kInvalidInfinitamDepth;
     }
@@ -296,11 +270,13 @@ uint16_t DepthFromDisparity(float disparity_px, float baseline_m, float focal_le
 /// Only computes the map in the left camera's frame.
 /// \param depth_out The preallocated depth map object, to be populated by
 /// this function.
-void ComputeDisparityElas(
+void ComputeDepthElas(
     const image<uchar> &left,
     const image<uchar> &right,
-    const float baseline_m,
-    const float focal_length_px,
+    const double baseline_m,
+    const double focal_length_px,
+    const double min_depth_m,
+    const double max_depth_m,
     image<uint16_t> *depth_out
 ) {
   // Heavily based on the demo program which ships with libelas.
@@ -326,8 +302,8 @@ void ComputeDisparityElas(
   // Around 100 the artifacts become quite large. Setting it to a conservative '1' still produces
   // artifacts in the sky and around trees.
   params.ipol_gap_width = 21;
-
   params.postprocess_only_left = true;
+
   Elas elas(params);
   elas.process(left.data, right.data, D1_data, D2_data, dims);
 
@@ -335,27 +311,29 @@ void ComputeDisparityElas(
   // expressed in centimeters.
   for (int32_t i = 0; i < width * height; i++) {
     // Output 16-bit depth values, in the Kinect style.
-    depth_out->data[i] = DepthFromDisparity(D1_data[i], baseline_m, focal_length_px);
+    depth_out->data[i] = DepthFromDisparity(D1_data[i], baseline_m, focal_length_px,
+                                            min_depth_m, max_depth_m);
   }
 
   free(D1_data);
   free(D2_data);
 }
 
-/// \brief Computes the disparity map from a stereo pair.
+/// \brief Computes the depth map from a stereo pair.
 /// Only computes the map in the left camera's frame.
-/// \param depth_out The pre-allocated depth map object, to be populated by
-/// this function.
-void ComputeDisparity(
+/// \param depth_out The pre-allocated depth map object, to be populated by this function.
+void ComputeDepth(
     const image<uchar> &left,
     const image<uchar> &right,
-    const float baseline_m,
-    const float focal_length_px,
+    const double baseline_m,
+    const double focal_length_px,
+    const double min_depth_m,
+    const double max_depth_m,
     image<uint16_t> *depth_out
 ) {
   // Note: can add support for other libraries here, such as OpenCV's
   // built-in SGM, or something else.
-  return ComputeDisparityElas(left, right, baseline_m, focal_length_px, depth_out);
+  return ComputeDepthElas(left, right, baseline_m, focal_length_px, min_depth_m, max_depth_m, depth_out);
 }
 
 /// \brief Produces a Kintinuous-specific '.klg' file from a KITTI sequence.
@@ -527,11 +505,12 @@ void ComputeDisparity(
 void ProcessInfinitamFrame(int idx,
                            const experimental::filesystem::path &output_path,
                            const bool use_color,
-                           float baseline_m,
-                           float focal_length_px,
-                           const vector<StereoFrameFpaths> &stereo_pair_fpaths,
+                           double baseline_m,
+                           double focal_length_px,
+                           double min_depth_m,
+                           double max_depth_m,
+                           const StereoFrameFpaths &pair_fpaths,
                            const cv::Size &target_size) {
-  const auto &pair_fpaths = stereo_pair_fpaths[idx];
   auto img_pair = LoadStereoPair(pair_fpaths);
 
   int32_t width = img_pair->first->width();
@@ -558,27 +537,15 @@ void ProcessInfinitamFrame(int idx,
 
   auto depth = make_shared<image<uint16_t>>(width, height);
   int64_t disp_start = GetTimeMs();
-  ComputeDisparity(*(img_pair->first), *(img_pair->second), baseline_m,
-                   focal_length_px, depth.get());
+  ComputeDepth(*(img_pair->first), *(img_pair->second), baseline_m, focal_length_px,
+               min_depth_m, max_depth_m, depth.get());
   int64_t disp_time = GetTimeMs() - disp_start;
-  cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << ". "
-       << "Took " << disp_time << "ms." << endl;
+  if (idx % 17 == 0) {
+    cout << "Processing " << pair_fpaths.left_gray_fpath.filename() << ". "
+         << "Took " << disp_time << "ms." << endl;
+  }
 
   cv::Mat *depth_cv = ToCvMat(*depth);
-
-  // Resize the images if the target size is different from the input one.
-  // Note that resizing may produce artifacts, especially in the depth
-  // channel.
-  cv::Mat depth_cv_resized(target_size, CV_16U);
-  cv::Mat left_frame_resized(target_size, CV_8U);
-  if (target_size != kKittiFrameSize) {
-    resize(*depth_cv, depth_cv_resized, target_size);
-    resize(left_frame_cv_col, left_frame_resized, target_size);
-  } else {
-// TODO(andrei): Can we do this in a nicer fashion?
-    depth_cv_resized = *depth_cv;
-    left_frame_resized = left_frame_cv_col;
-  }
 
   ostringstream depth_fname;
   depth_fname << setfill('0') << setw(4) << idx << ".pgm";
@@ -588,8 +555,8 @@ void ProcessInfinitamFrame(int idx,
   fs::path depth_fpath = output_path / "Frames" / depth_fname.str();
   fs::path color_fpath = output_path / "Frames" / color_fname.str();
 
-  imwrite(color_fpath, left_frame_resized);
-  imwrite(depth_fpath, depth_cv_resized);
+  imwrite(color_fpath, *depth_cv);
+  imwrite(depth_fpath, left_frame_cv_col);
 
   delete depth_cv;
 }
@@ -609,7 +576,11 @@ void BuildInfinitamLog(
     const fs::path &kitti_sequence_root,
     const fs::path &output_path,
     const int frame_count,
-    const bool use_color
+    const bool use_color,
+    const double focal_length_px,
+    const double stereo_baseline_m,
+    const double min_depth_m,
+    const double max_depth_m
 ) {
   if (!fs::exists(kitti_sequence_root)) {
     cerr << "Could not find KITTI dataset root directory at: "
@@ -617,20 +588,11 @@ void BuildInfinitamLog(
     return;
   }
 
-  // Calibration parameters of the KITTI dataset stereo rig.
-//    float baseline_m = 0.571f;
-//    float focal_length_px = 645.2f;
-
-  // Parameters used in the KITTI-odometry dataset.
-  float baseline_m = 0.537150654273f;
-  float focal_length_px = 707.0912f;
-
   vector<StereoFrameFpaths> stereo_pair_fpaths = GetKittiStereoPairPaths(kitti_sequence_root);
 
   fs::path frames_folder = output_path / "Frames";
   if (!fs::exists(frames_folder)) {
-    cout << "Output directory did not exist. Creating: " << frames_folder
-         << endl;
+    cout << "Output directory did not exist. Creating: " << frames_folder << endl;
     fs::create_directories(frames_folder);
   }
 
@@ -652,7 +614,7 @@ void BuildInfinitamLog(
   //  - 6 threads: 31.910s
   //  - 8 threads: 28.308s
   //  - 8 threads no output: 31.53s 27.191s 27.024s
-  ctpl::thread_pool p(8);
+  ctpl::thread_pool p(7);
   for (int i = 0; i < stereo_pair_fpaths.size(); ++i) {
     if (frame_count > -1 && i >= frame_count) {
     // Jobs may still be running in the background here.
@@ -667,20 +629,30 @@ void BuildInfinitamLog(
       ProcessInfinitamFrame(i,
                             output_path,
                             use_color,
-                            baseline_m,
+                            stereo_baseline_m,
                             focal_length_px,
-                            stereo_pair_fpaths,
+                            min_depth_m,
+                            max_depth_m,
+                            stereo_pair_fpaths[i],
                             target_size);
     });
 
     // This prevents the queue from getting overloaded, which can use TONS of memory.
     // It's not the best solution but it works.
-    while (p.size() == 0) {
-      using namespace std::chrono_literals;
-      cout << "Workers are busy, going to wait..." << endl;
-      this_thread::sleep_for(10ms);
-    }
+//    while (p.n_idle() == 0) {
+//      using namespace std::chrono_literals;
+//      this_thread::sleep_for(10ms);
+//    }
   }
+}
+
+double ReadFocalLength(fs::path kitti_odo_calib) {
+  ifstream in(kitti_odo_calib);
+  string dummy;
+  double focal_length_px_x;
+  in >> dummy >> focal_length_px_x;
+
+  return focal_length_px_x;
 }
 
 } // namespace kitti2klg
@@ -705,14 +677,29 @@ int main(int argc, char **argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   if (kitti2klg::FLAGS_kitti_root.empty()) {
-    std::cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)."
-              << std::endl;
+    std::cerr << "Please specify a KITTI root folder (--kitti_root=<folder>)." << std::endl;
     exit(1);
+  }
+
+  if (kitti2klg::FLAGS_baseline_meters < 0) {
+    std::cerr << "Please specify the baseline (--baseline_meters=<double>)." << std::endl;
+    exit(2);
+  }
+
+  if (kitti2klg::FLAGS_calib_file.empty()) {
+    std::cerr << "Please specify a calibration file for creating the depth maps." << std::endl;
+    exit(3);
   }
 
   fs::path kitti_seq_path = kitti2klg::FLAGS_kitti_root;
   fs::path output_path = kitti2klg::FLAGS_output;
+  fs::path relative_calib_path = kitti2klg::FLAGS_calib_file;
+  double focal_length_px = kitti2klg::ReadFocalLength(kitti_seq_path / relative_calib_path);
 
+  std::cout << "Using a baseline of " << kitti2klg::FLAGS_baseline_meters << "m, a focal length of "
+            << focal_length_px << " pixels, and keeping depth values in the range ["
+            << kitti2klg::FLAGS_min_depth_meters << "--" << kitti2klg::FLAGS_max_depth_meters
+            << "]." << std::endl;
   std::cout << "Loading KITTI pairs from folder [" << kitti_seq_path
             << "] and outputting ";
 
@@ -728,7 +715,11 @@ int main(int argc, char **argv) {
     kitti2klg::BuildInfinitamLog(kitti_seq_path,
                                  output_path,
                                  kitti2klg::FLAGS_process_frames,
-                                 kitti2klg::FLAGS_use_color);
+                                 kitti2klg::FLAGS_use_color,
+                                 kitti2klg::FLAGS_baseline_meters,
+                                 focal_length_px,
+                                 kitti2klg::FLAGS_min_depth_meters,
+                                 kitti2klg::FLAGS_max_depth_meters);
   } else {
     // Process the stereo data into a Kintinuous-style binary logfile
     // consisting of JPEG-compressed RGB frames and zipped (!) depth channels
